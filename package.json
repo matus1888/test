@@ -9,7 +9,7 @@
     "lint": "oxlint",
     "preview": "vite preview"
   },
-   "dependencies": {
+    "dependencies": {
     "@tanstack/react-query": "^5.103.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
