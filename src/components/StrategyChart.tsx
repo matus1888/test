@@ -1,10 +1,12 @@
 import { useMemo } from 'react';
 import type { Candle } from '../api/bybit';
 import type { TradePlan } from '../lib/tradePlan';
+import { fmtTime } from '../lib/paper';
 import Term from './Term';
 
 const UP = '#26a69a';
 const DOWN = '#ef5350';
+const LIQ = '#f6465d';
 const W = 900;
 const H = 380;
 const PAD_L = 8;
@@ -24,8 +26,19 @@ function emaSeries(values: number[], period: number): number[] {
   return out;
 }
 
+/** Вертикальный маркер события (вход/выход): линия по времени + подпись. */
+export interface ChartMarker {
+  time: number;
+  label: string;
+  color: string;
+}
+
 /** SVG-график стратегии: свечи + EMA + зона входа + стоп + тейки. Без зависимостей. */
-export default function StrategyChart({ candles, plan }: { candles: Candle[]; plan: TradePlan }) {
+export default function StrategyChart(
+  { candles, plan, markers = [], liqPrice = null, decimals = 4 }: {
+    candles: Candle[]; plan: TradePlan; markers?: ChartMarker[]; liqPrice?: number | null; decimals?: number;
+  },
+) {
   const view = useMemo(() => {
     const data = candles.slice(-120);
     const n = data.length;
@@ -40,6 +53,16 @@ export default function StrategyChart({ candles, plan }: { candles: Candle[]; pl
     let lo = Math.min(...data.map((c) => c.low), ...levels);
     let hi = Math.max(...data.map((c) => c.high), ...levels);
     if (!(hi > lo)) return null;
+
+    // Ликвидация: втискиваем в масштаб, только если она рядом (в пределах
+    // половины видимого диапазона за краем), иначе покажем метку у края.
+    const liq = liqPrice != null && Number.isFinite(liqPrice) && liqPrice > 0 ? liqPrice : null;
+    const span0 = hi - lo;
+    const liqShown = liq != null && liq > lo - span0 * 0.5 && liq < hi + span0 * 0.5;
+    if (liqShown && liq != null) {
+      lo = Math.min(lo, liq);
+      hi = Math.max(hi, liq);
+    }
     const pad = (hi - lo) * 0.06;
     lo -= pad; hi += pad;
 
@@ -52,11 +75,19 @@ export default function StrategyChart({ candles, plan }: { candles: Candle[]; pl
     const vmax = Math.max(...data.map((c) => c.volume), 1e-9);
     const volY = (v: number) => H - 12 - (v / vmax) * VOL_H;
 
-    return { data, n, e20, e50, lo, hi, y, x, step, bw, volY };
-  }, [candles, plan]);
+    // Маркеры событий → индексы свечей. События старше видимого окна
+    // пропускаем, события новее последней свечи клеим к правому краю.
+    const marks = markers.map((mk, j) => {
+      let idx = data.findIndex((c) => c.time >= mk.time);
+      if (idx === -1) idx = mk.time >= data[n - 1].time ? n - 1 : -1;
+      return { mk, idx, j };
+    }).filter((x) => x.idx >= 0);
+
+    return { data, n, e20, e50, lo, hi, y, x, step, bw, volY, marks, liq, liqShown };
+  }, [candles, plan, markers, liqPrice]);
 
   if (!view) return null;
-  const { data, n, e20, e50, y, x, bw, volY } = view;
+  const { data, n, e20, e50, y, x, bw, volY, marks, liq, liqShown } = view;
   const wait = plan.direction === 'wait';
 
   const line = (s: number[]) =>
@@ -78,6 +109,8 @@ export default function StrategyChart({ candles, plan }: { candles: Candle[]; pl
       <div className="chart-legend">
         <span>{wait ? 'Диапазон 20 свечей' : plan.direction === 'long' ? 'Лонг-зона' : 'Шорт-зона'}</span>
         <Term t="ema" label="Линии: EMA20 голубая · EMA50 оранжевая" />
+        {marks.length > 0 && <span>Вход/выход — вертикальный пунктир со временем</span>}
+        {liq != null && <Term t="liq" label={`LIQ ~${liq.toFixed(decimals)} — оценка ликвидации`} />}
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', display: 'block' }} role="img">
         {/* зона входа / диапазон */}
@@ -128,6 +161,35 @@ export default function StrategyChart({ candles, plan }: { candles: Candle[]; pl
             {hline(plan.stop, DOWN, '6 3', 'stop', 'STOP')}
           </>
         )}
+        {/* ликвидация: линия в масштабе либо метка у края */}
+        {liq != null && liqShown && hline(liq, LIQ, '6 3', 'liq', 'LIQ')}
+        {liq != null && !liqShown && (
+          <g>
+            {liq > view.hi ? (
+              <polygon points={`${W - PAD_R - 8},${PAD_T + 12} ${W - PAD_R + 8},${PAD_T + 12} ${W - PAD_R},${PAD_T + 2}`} fill={LIQ} />
+            ) : (
+              <polygon points={`${W - PAD_R - 8},${H - 24} ${W - PAD_R + 8},${H - 24} ${W - PAD_R},${H - 14}`} fill={LIQ} />
+            )}
+            <text
+              x={W - PAD_R} y={liq > view.hi ? PAD_T + 26 : H - 28}
+              fontSize={10} fill={LIQ} fontWeight={700} textAnchor="end"
+            >
+              LIQ ~{liq.toFixed(decimals)}
+            </text>
+          </g>
+        )}
+        {/* маркеры входа/выхода */}
+        {marks.map(({ mk, idx, j }) => {
+          const lx = Math.min(Math.max(x(idx), 70), W - PAD_R - 70);
+          return (
+            <g key={`m${j}`}>
+              <line x1={x(idx)} x2={x(idx)} y1={PAD_T} y2={H - 12} stroke={mk.color} strokeWidth={1} strokeDasharray="3 3" opacity={0.85} />
+              <text x={lx} y={11} fontSize={10} fill={mk.color} fontWeight={700} textAnchor="middle">
+                {mk.label} · {fmtTime(mk.time)}
+              </text>
+            </g>
+          );
+        })}
         {/* подписи мин/макс */}
         <text x={PAD_L} y={14} fontSize={10} fill="#8b93a1">
           {view.hi.toFixed(4)} ··· {view.lo.toFixed(4)} · последние {n} свечей

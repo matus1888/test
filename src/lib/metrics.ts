@@ -57,10 +57,33 @@ function rsi(closes: number[], period = 14): number {
   return 100 - 100 / (1 + rs);
 }
 
+/**
+ * Санация свечей перед расчётом метрик и планов: отбрасывает свечи с нефинитным
+ * или неположительным close (логарифм доходности иначе даёт NaN/-Inf),
+ * перевёрнутые high/low чинит перестановкой, нефинитный объём — нулём.
+ */
+export function sanitizeCandles(candles: Candle[]): Candle[] {
+  const out: Candle[] = [];
+  for (const c of candles) {
+    if (!Number.isFinite(c.close) || c.close <= 0) continue;
+    let high = Number.isFinite(c.high) ? c.high : c.close;
+    let low = Number.isFinite(c.low) ? c.low : c.close;
+    if (high < low) {
+      const t = high;
+      high = low;
+      low = t;
+    }
+    const volume = Number.isFinite(c.volume) ? c.volume : 0;
+    out.push({ ...c, high, low, volume });
+  }
+  return out;
+}
+
 export function computeMetrics(candles: Candle[]): SymbolMetrics | null {
-  const n = candles.length;
+  const rows = sanitizeCandles(candles);
+  const n = rows.length;
   if (n < 10) return null;
-  const closes = candles.map((c) => c.close);
+  const closes = rows.map((c) => c.close);
   const lastPrice = closes[n - 1];
   const first = closes[0];
 
@@ -68,12 +91,12 @@ export function computeMetrics(candles: Candle[]): SymbolMetrics | null {
   let atrSum = 0;
   const atrN = Math.min(14, n);
   for (let i = 0; i < n; i++) {
-    const c = candles[i];
+    const c = rows[i];
     rangeSum += ((c.high - c.low) / c.close) * 100;
   }
   for (let i = n - atrN; i < n; i++) {
-    const c = candles[i];
-    const p = candles[Math.max(0, i - 1)];
+    const c = rows[i];
+    const p = rows[Math.max(0, i - 1)];
     const tr = Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
     atrSum += tr;
   }
@@ -96,17 +119,20 @@ export function computeMetrics(candles: Candle[]): SymbolMetrics | null {
     else break;
   }
 
-  const vols = candles.map((c) => c.volume);
+  const vols = rows.map((c) => c.volume);
   const avg20 = vols.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, vols.length);
 
   const volatilityRange = rangeSum / n;
   const volatilityStd = Math.sqrt(variance) * 100;
   const atrPct = (atrSum / atrN / lastPrice) * 100;
   const changePct = ((lastPrice / first) - 1) * 100;
-  const trendSlopePct = (slope * n / lastPrice) * 100;
+  // Нормализация к первой цене окна (та же база, что у changePct):
+  // зеркальные ряды получают симметричный тренд, без bias к упавшим монетам.
+  const trendSlopePct = (slope * n / first) * 100;
   const volumeRatio = avg20 > 0 ? vols[n - 1] / avg20 : 0;
 
-  const score = Math.abs(trendSlopePct) * (0.3 + r2) + volatilityRange * 0.3 + Math.min(Math.abs(momentumPct), 20) * 0.2;
+  const rawScore = Math.abs(trendSlopePct) * (0.3 + r2) + volatilityRange * 0.3 + Math.min(Math.abs(momentumPct), 20) * 0.2;
+  const score = Number.isFinite(rawScore) ? rawScore : 0;
 
   return {
     lastPrice,

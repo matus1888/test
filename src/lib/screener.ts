@@ -68,7 +68,9 @@ export function buildRows(
       fundingRate: t?.fundingRate ?? null,
       m,
       direction: plan?.direction ?? null,
-      confidence: plan?.confidence ?? null,
+      // Уверенность показываем только для направленного сетапа:
+      // у wait-плана её нет, в таблице будет «—».
+      confidence: plan && plan.direction !== 'wait' ? plan.confidence : null,
       klineError: k?.error ?? null,
       klineLoading: k?.loading ?? false,
     };

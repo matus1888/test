@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { PaperPosition, SettleInfo } from '../lib/paper';
+import { applySettle, type PaperPosition, type SettleInfo } from '../lib/paper';
 
 const KEY = 'paper:positions:v1';
 
@@ -64,22 +64,11 @@ export function usePaperPositions() {
     [update],
   );
 
-  /** Материализация авто-закрытий (стоп/TP3). Пишет только если есть изменения. */
+  /** Материализация авто-закрытий и частичных выходов. Пишет только если есть изменения. */
   const settle = useCallback(
     (list: { id: string; info: SettleInfo }[]) => {
       if (list.length === 0) return;
-      update((prev) => {
-        let changed = false;
-        const next = prev.map((p) => {
-          const f = list.find((x) => x.id === p.id);
-          if (f && p.status === 'open') {
-            changed = true;
-            return { ...p, status: 'closed' as const, ...f.info };
-          }
-          return p;
-        });
-        return changed ? next : prev;
-      });
+      update((prev) => applySettle(prev, list));
     },
     [update],
   );

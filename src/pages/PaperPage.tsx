@@ -7,9 +7,10 @@ import { groupByCategory, useLivePrices } from '../hooks/useLivePrices';
 import {
   closeLabel,
   evaluatePosition,
+  eventLabel,
   fmtTime,
-  pnlOf,
   settleOpen,
+  totalPnlOf,
 } from '../lib/paper';
 import { fmt, fmtPct } from '../lib/format';
 import { setupCls } from '../lib/ui';
@@ -44,13 +45,25 @@ export default function PaperPage() {
   const closed = positions.filter((p) => p.status === 'closed');
   const prices = useLivePrices(groupByCategory(open));
 
+  // Качество закрытых: средний R и доля достигавших TP1 (по доступной истории свечей).
+  let rSum = 0;
+  let tp1n = 0;
+  for (const p of closed) {
+    const i = positions.indexOf(p);
+    rSum += totalPnlOf(p, p.closePrice ?? p.entryPrice).netR;
+    const ev = evaluatePosition(p, candleQueries[i]?.data ?? []);
+    if (!ev.partial && ev.maxTp >= 1) tp1n += 1;
+  }
+  const avgR = closed.length > 0 ? rSum / closed.length : null;
+  const tp1pct = closed.length > 0 ? Math.round((tp1n / closed.length) * 100) : null;
+
   const priceOf = (p: (typeof positions)[number]) =>
     p.status === 'open' ? (prices.get(`${p.category}:${p.symbol}`) ?? p.entryPrice) : (p.closePrice ?? p.entryPrice);
 
-  const totals = positions.map((p) => pnlOf(p, priceOf(p)).pnl);
+  const totals = positions.map((p) => totalPnlOf(p, priceOf(p)).net);
   const total = totals.reduce((a, b) => a + b, 0);
   const stakeSum = positions.reduce((a, p) => a + p.stake, 0);
-  const wins = closed.filter((p) => pnlOf(p, p.closePrice ?? p.entryPrice).pnl > 0).length;
+  const wins = closed.filter((p) => totalPnlOf(p, p.closePrice ?? p.entryPrice).net > 0).length;
 
   const erase = (e: React.MouseEvent, id: string, symbol: string) => {
     e.stopPropagation();
@@ -83,6 +96,11 @@ export default function PaperPage() {
           <div className="lvl"><span>Открыто</span><b>{open.length}</b></div>
           <div className="lvl"><span>Закрыто</span><b>{closed.length}</b></div>
         </div>
+        <div className="card">
+          <h3><Term t="expectancy" label="Качество" /></h3>
+          <div className="lvl"><span>Средний R</span><b>{avgR === null ? '—' : `${fmt(avgR, 2)}R`}</b></div>
+          <div className="lvl"><span>TP1 достигал</span><b>{tp1pct === null ? '—' : `${tp1pct}%`}</b></div>
+        </div>
       </section>
 
       {positions.length === 0 ? (
@@ -105,9 +123,13 @@ export default function PaperPage() {
             <tbody>
               {positions.map((p, i) => {
                 const exit = priceOf(p);
-                const r = pnlOf(p, exit);
+                const r = totalPnlOf(p, exit);
                 const ev = evaluatePosition(p, candleQueries[i]?.data ?? []);
-                const tps = ev.events.filter((e) => e.type !== 'stop').map((e) => e.type.toUpperCase());
+                const reached = new Set([
+                  ...(p.legs ?? []).map((l) => l.reason),
+                  ...ev.events.filter((e) => e.type === 'tp1' || e.type === 'tp2' || e.type === 'tp3').map((e) => e.type),
+                ]);
+                const tps = [...reached].map((t) => eventLabel(t as 'tp1' | 'tp2' | 'tp3'));
                 return (
                   <tr key={p.id} onClick={() => navigate(`/paper/${p.id}`)}>
                     <td className="sym">{p.symbol}<br /><span className="muted">{p.category} · {p.interval}</span></td>
@@ -115,8 +137,8 @@ export default function PaperPage() {
                     <td>{fmt(p.entryPrice, 4)}<br /><span className="muted">{fmtTime(p.openedAt)}</span></td>
                     <td>{fmt(exit, 4)}</td>
                     <td>{fmt(p.stake)} $ ×{p.leverage}</td>
-                    <td className={r.pnl > 0 ? 'pos' : r.pnl < 0 ? 'neg' : ''}>
-                      {r.pnl >= 0 ? '+' : ''}{fmt(r.pnl)} $ ({fmtPct(r.pct, 1)})
+                    <td className={r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : ''}>
+                      {r.net >= 0 ? '+' : ''}{fmt(r.net)} $ ({fmtPct(r.netPct, 1)})
                     </td>
                     <td>
                       {p.status === 'open'
@@ -133,7 +155,7 @@ export default function PaperPage() {
       )}
 
       <footer className="foot">
-        Открытые позиции переоцениваются по живым тикерам. Стоп и TP3 закрывают позицию автоматически, TP1/TP2 — достигнутые уровни. Клик по строке — детальный разбор.
+        Открытые позиции переоцениваются по живым тикерам. TP1 фиксирует 70% позиции, TP2 — ещё 20%, остаток идёт до TP3; после TP1 стоп переносится в безубыток. P&L показан чистыми — за вычетом комиссии за круг (тейкер). Клик по строке — детальный разбор.
       </footer>
     </div>
   );

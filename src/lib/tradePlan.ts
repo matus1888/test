@@ -1,8 +1,13 @@
 import type { Candle } from '../api/bybit';
 import type { Category } from '../api/bybit';
-import type { SymbolMetrics } from './metrics';
+import { sanitizeCandles, type SymbolMetrics } from './metrics';
 
 export type Direction = 'long' | 'short' | 'wait';
+
+/** Минимальный счёт для направленного сетапа. Шортам планка выше:
+ * на бэктесте шорты систематически хуже лонгов в обоих режимах рынка. */
+export const LONG_MIN_SCORE = 4;
+export const SHORT_MIN_SCORE = 5;
 
 export interface TradePlan {
   direction: Direction;
@@ -59,6 +64,27 @@ export function horizonForInterval(interval: string): string {
   return 'Свинг · удержание дни–недели';
 }
 
+/**
+ * Предупреждение, если старшие таймфреймы против направления: бэктест показывает,
+ * что лонги против часового тренда теряют заметно больше (−0,30R против −0,11R).
+ * Мягкий сигнал (не ворота): только строка в рисках, сетап не отменяется.
+ */
+export function htfRisk(
+  tfPlans: { interval: string; plan: TradePlan | null }[],
+  direction: Direction,
+  higher: string[] = ['60', '120', '240'],
+): string | null {
+  if (direction === 'wait') return null;
+  const opp: Direction = direction === 'long' ? 'short' : 'long';
+  const against = tfPlans.filter(
+    (t) => higher.includes(t.interval) && t.plan != null && t.plan.direction === opp,
+  ).length;
+  if (against >= 2) {
+    return `Старшие таймфреймы против позиции (${against} из ${higher.length}): импульс ниже может не дотянуть до целей — безубыток после TP1 обязателен.`;
+  }
+  return null;
+}
+
 export function buildTradePlan(
   candles: Candle[],
   m: SymbolMetrics,
@@ -66,14 +92,15 @@ export function buildTradePlan(
   fundingRate: number | null,
   interval = '',
 ): TradePlan | null {
-  const n = candles.length;
+  const rows = sanitizeCandles(candles);
+  const n = rows.length;
   if (n < 55 || !Number.isFinite(m.lastPrice) || m.lastPrice <= 0) return null;
-  const closes = candles.map((c) => c.close);
+  const closes = rows.map((c) => c.close);
   const price = closes[n - 1];
   const e20 = ema(closes, 20);
   const e50 = ema(closes, 50);
-  const atr = atrAbs(candles, 14);
-  const window20 = candles.slice(-20);
+  const atr = atrAbs(rows, 14);
+  const window20 = rows.slice(-20);
   const recentHigh = Math.max(...window20.map((c) => c.high));
   const recentLow = Math.min(...window20.map((c) => c.low));
   const horizon = horizonForInterval(interval);
@@ -99,9 +126,9 @@ export function buildTradePlan(
 
   const allowShort = category !== 'spot';
   let direction: Direction = 'wait';
-  if (allowShort && shortScore > longScore && shortScore >= 4) direction = 'short';
-  else if (longScore > shortScore && longScore >= 4) direction = 'long';
-  else if (!allowShort && longScore >= 4) direction = 'long';
+  if (allowShort && shortScore > longScore && shortScore >= SHORT_MIN_SCORE) direction = 'short';
+  else if (longScore > shortScore && longScore >= LONG_MIN_SCORE) direction = 'long';
+  else if (!allowShort && longScore >= LONG_MIN_SCORE) direction = 'long';
 
   const best = direction === 'long' ? longScore : direction === 'short' ? shortScore : Math.max(longScore, shortScore);
   const confidence = Math.round(Math.min(92, Math.max(8, (best / 7) * 100 + (m.trendR2 > 0.6 ? 6 : 0))));

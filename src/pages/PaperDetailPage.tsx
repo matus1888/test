@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { fetchKlines, fetchTickers } from '../api/bybit';
@@ -6,10 +6,13 @@ import { usePaperPositions } from '../hooks/usePaper';
 import {
   closeLabel,
   evaluatePosition,
+  eventLabel,
   fmtDuration,
   fmtTime,
-  pnlOf,
+  liquidationPrice,
   settleOpen,
+  totalPnlOf,
+  TP_FRACS,
   type PaperPosition,
 } from '../lib/paper';
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
@@ -70,7 +73,7 @@ export default function PaperDetailPage() {
     retry: 1,
   });
 
-  const candles = klines.data ?? [];
+  const candles = useMemo(() => klines.data ?? [], [klines.data]);
   const ev = pos ? evaluatePosition(pos, candles) : null;
 
   // Материализация авто-закрытия
@@ -78,7 +81,7 @@ export default function PaperDetailPage() {
     if (!pos || pos.status !== 'open' || candles.length === 0) return;
     const info = settleOpen(pos, candles);
     if (info) settle([{ id: pos.id, info }]);
-  });
+  }, [pos, candles, settle]);
 
   if (!pos) {
     return (
@@ -91,18 +94,32 @@ export default function PaperDetailPage() {
 
   const live = tickers.data?.find((t) => t.symbol === pos.symbol)?.lastPrice ?? pos.entryPrice;
   const exit = pos.status === 'open' ? live : (pos.closePrice ?? pos.entryPrice);
-  const r = pnlOf(pos, exit);
+  const r = totalPnlOf(pos, exit);
   const exitTime = pos.status === 'open' ? Date.now() : (pos.closedAt ?? pos.openedAt);
   const decimals = pos.entryPrice < 1 ? 5 : 2;
+  // Оценка ликвидации для изолированной маржи. При плече 1× лонг
+  // ликвидировать нельзя (0 — недостижимо), линию на графике не рисуем.
+  const liq = liquidationPrice(pos);
+  const liqLine = liq != null && liq > 0 ? liq : null;
 
+  const persistedLegs = new Set((pos.legs ?? []).map((l) => l.reason));
+  const legText = (reason: 'tp1' | 'tp2', price: number, frac: number) =>
+    `Частичный выход ${eventLabel(reason)} (${Math.round(frac * 100)}%) по ${fmt(price, decimals)}`;
   const timeline: { time: number; text: string }[] = [
     { time: pos.openedAt, text: `Открыта: ${pos.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'} по ${fmt(pos.entryPrice, decimals)} · ставка ${fmt(pos.stake)} $ ×${pos.leverage}` },
-    ...(ev?.events.map((e) => ({
-      time: e.time,
-      text: e.type === 'stop'
-        ? `Задет стоп по ${fmt(e.price, decimals)}`
-        : `Достигнут ${e.type.toUpperCase()} по ${fmt(e.price, decimals)}`,
-    })) ?? []),
+    ...(pos.legs ?? []).map((l) => ({ time: l.time, text: legText(l.reason, l.price, l.frac) })),
+    ...(ev?.events
+      .filter((e) => !((e.type === 'tp1' || e.type === 'tp2') && persistedLegs.has(e.type)))
+      .map((e) => ({
+        time: e.time,
+        text: e.type === 'stop'
+          ? `Задет стоп по ${fmt(e.price, decimals)}`
+          : e.type === 'breakeven'
+            ? `Сработал безубыток по ${fmt(e.price, decimals)}`
+            : e.type === 'tp1' || e.type === 'tp2'
+              ? legText(e.type, e.price, TP_FRACS[e.type])
+              : `Достигнут ${eventLabel(e.type)} по ${fmt(e.price, decimals)}`,
+      })) ?? []),
   ];
   if (pos.status === 'closed') {
     timeline.push({ time: pos.closedAt ?? pos.openedAt, text: `Закрыта (${closeLabel(pos.closeReason)}) по ${fmt(pos.closePrice ?? pos.entryPrice, decimals)}` });
@@ -145,15 +162,20 @@ export default function PaperDetailPage() {
           <div className="lvl"><span>Цена</span><b>{fmt(pos.entryPrice, decimals)}</b></div>
           <div className="lvl"><span><Term t="stake" label="Ставка" /></span><b>{fmt(pos.stake)} $</b></div>
           <div className="lvl"><span><Term t="leverage" label="Плечо" /></span><b>×{pos.leverage}</b></div>
-          <div className="lvl"><span><Term t="qty" label="Количество" /></span><b>{fmt(pos.stake * pos.leverage / pos.entryPrice, 4)}</b></div>
+          <div className="lvl"><span><Term t="qty" label="Количество" /></span><b>{fmt(pos.qty, 4)}</b></div>
           <div className="lvl"><span><Term t="confidence" label="Уверенность" /></span><b>{pos.confidence}%</b></div>
         </div>
         <div className="card">
           <h3><Term t="pnl" label="Итог" /></h3>
           <div className="lvl"><span>{pos.status === 'open' ? 'Текущая цена' : 'Цена выхода'}</span><b>{fmt(exit, decimals)}</b></div>
           <div className="lvl"><span>P&L, $</span><b className={r.pnl > 0 ? 'pos' : r.pnl < 0 ? 'neg' : ''}>{r.pnl >= 0 ? '+' : ''}{fmt(r.pnl)}</b></div>
-          <div className="lvl"><span>P&L, % к ставке</span><b>{fmtPct(r.pct, 1)}</b></div>
-          <div className="lvl"><span><Term t="rMultiple" label="R-мультипл" /></span><b>{fmt(r.r, 2)}R</b></div>
+          {(pos.legs ?? []).length > 0 && (
+            <div className="lvl"><span>Зафиксировано частями</span><b className="pos">+{fmt(r.booked)}</b></div>
+          )}
+          <div className="lvl"><span><Term t="fee" label="Комиссия ~" /></span><b>−{fmt(r.fee)}</b></div>
+          <div className="lvl"><span>P&L net, $</span><b className={r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : ''}>{r.net >= 0 ? '+' : ''}{fmt(r.net)}</b></div>
+          <div className="lvl"><span>P&L net, % к ставке</span><b>{fmtPct(r.netPct, 1)}</b></div>
+          <div className="lvl"><span><Term t="rMultiple" label="R-мультипл net" /></span><b>{fmt(r.netR, 2)}R</b></div>
           <div className="lvl"><span><Term t="holding" label="Время в позиции" /></span><b>{fmtDuration(exitTime - pos.openedAt)}</b></div>
         </div>
         <div className="card">
@@ -170,6 +192,12 @@ export default function PaperDetailPage() {
               hit={ev?.events.some((e) => e.type === k)}
             />
           ))}
+          <LevelRow
+            label="Ликвидация ~"
+            gloss="liq"
+            value={liq == null ? '—' : liq <= 0 ? '0 (1× — недостижима)' : fmt(liq, decimals)}
+            cls="neg"
+          />
         </div>
         <div className="card">
           <h3>Движение цены</h3>
@@ -184,6 +212,14 @@ export default function PaperDetailPage() {
         <StrategyChart
           candles={candles}
           plan={planForChart(pos, Math.max(...candles.map((c) => c.high)), Math.min(...candles.map((c) => c.low)))}
+          markers={[
+            { time: pos.openedAt, label: 'Вход', color: '#3b82f6' },
+            ...(pos.status === 'closed' && pos.closedAt != null
+              ? [{ time: pos.closedAt, label: 'Выход', color: '#f59e0b' }]
+              : []),
+          ]}
+          liqPrice={liqLine}
+          decimals={decimals}
         />
       )}
 
@@ -197,7 +233,7 @@ export default function PaperDetailPage() {
       </section>
 
       <footer className="foot">
-        Номинал позиции: {fmtCompact(pos.stake * pos.leverage)}. P&L считается от плеча: движение цены × количество.
+        Номинал позиции: {fmtCompact(pos.qty * pos.entryPrice)}. P&L считается от плеча: движение цены × количество, чистыми за вычетом комиссии за круг (тейкер). TP1 фиксирует 70%, TP2 — 20%, после TP1 стоп в безубытке. Линия LIQ — оценка ликвидации для изолированной маржи, не точная цена биржи.
       </footer>
     </div>
   );

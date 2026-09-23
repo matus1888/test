@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 import { usePaperPositions } from '../hooks/usePaper';
 import { groupByCategory, useLivePrices } from '../hooks/useLivePrices';
-import { pnlOf } from '../lib/paper';
+import { totalPnlOf } from '../lib/paper';
 import { fmt } from '../lib/format';
 import Term from './Term';
 
@@ -13,11 +13,11 @@ export default function PaperHeader() {
 
   let unreal = 0;
   for (const p of open) {
-    unreal += pnlOf(p, prices.get(`${p.category}:${p.symbol}`) ?? p.entryPrice).pnl;
+    unreal += totalPnlOf(p, prices.get(`${p.category}:${p.symbol}`) ?? p.entryPrice).net;
   }
   let realized = 0;
   for (const p of positions) {
-    if (p.status === 'closed') realized += pnlOf(p, p.closePrice ?? p.entryPrice).pnl;
+    if (p.status === 'closed') realized += totalPnlOf(p, p.closePrice ?? p.entryPrice).net;
   }
   const total = unreal + realized;
   const cls = total > 0 ? 'pos' : total < 0 ? 'neg' : '';

@@ -15,7 +15,7 @@ import {
 import { computeMetrics } from '../lib/metrics';
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
 import { setupCls, setupText } from '../lib/ui';
-import { buildTradePlan } from '../lib/tradePlan';
+import { buildTradePlan, htfRisk } from '../lib/tradePlan';
 import StrategyChart from '../components/StrategyChart';
 import Term from '../components/Term';
 import TermList from '../components/TermList';
@@ -23,7 +23,7 @@ import QuickTrade from '../components/QuickTrade';
 import { ExternalIcon } from '../components/icons';
 import { useSessionState } from '../hooks/useSessionState';
 import { usePaperPositions } from '../hooks/usePaper';
-import { uid } from '../lib/paper';
+import { canOpenPosition, uid } from '../lib/paper';
 
 const isPositiveNumber = (v: unknown): v is number => typeof v === 'number' && v > 0;
 
@@ -37,7 +37,7 @@ export default function SymbolPage() {
   const [stake, setStake] = useSessionState<number>('paper:stake', 100, isPositiveNumber);
   const [lev, setLev] = useSessionState<number>('paper:leverage', 3, isPositiveNumber);
   const navigate = useNavigate();
-  const { add } = usePaperPositions();
+  const { add, positions } = usePaperPositions();
 
   const category: Category = isCategory(catParam) ? catParam : 'linear';
   const symbol = symParam ? decodeURIComponent(symParam) : '';
@@ -96,6 +96,8 @@ export default function SymbolPage() {
     [tfKlines, category, ticker],
   );
   const tfPending = tfKlines.filter((q) => q.isPending).length;
+  const htfNote = plan ? htfRisk(tfPlans, plan.direction) : null;
+  const allRisks = htfNote && plan ? [...plan.risks, htfNote] : (plan?.risks ?? []);
 
   const priceDecimals = (plan?.price ?? ticker?.lastPrice ?? 0) < 1 ? 5 : 2;
   const tradeUrl = bybitTradeUrl(category, symbol);
@@ -110,11 +112,22 @@ export default function SymbolPage() {
   const qty = plan && plan.riskDist > 0 ? riskMoney / plan.riskDist : 0;
   const notional = qty * (plan?.entryMid ?? 0);
 
-  // Бумажный вход: ставка + плечо, цена — текущая по рынку
-  const entryPrice = ticker?.lastPrice ?? plan?.price ?? 0;
-  const paperQty = entryPrice > 0 ? (stake * lev) / entryPrice : 0;
+  // Бумажный вход — лимитно по середине зоны (как велит план), размер из риска.
+  // Исполнение по рынку завышало бы вход и урезало реализованный R тейков.
+  const entryPrice = plan ? plan.entryMid : 0;
+  const marginNeeded = entryPrice > 0 && lev > 0 ? (qty * entryPrice) / lev : 0;
+  const limitReason = plan && plan.direction !== 'wait'
+    ? canOpenPosition(positions, { symbol, category, interval, direction: plan.direction })
+    : null;
+  const blockReason = !plan || plan.direction === 'wait'
+    ? 'Нет направленного сетапа'
+    : riskMoney <= 0
+      ? 'Укажи риск больше нуля'
+      : marginNeeded > stake
+        ? `Не хватает маржи: нужно ${fmt(marginNeeded)} $ при ×${lev} — подними ставку или плечо, либо снизь риск`
+        : limitReason;
   const openPaper = () => {
-    if (!plan || plan.direction === 'wait' || entryPrice <= 0 || stake <= 0 || lev <= 0) return;
+    if (!plan || plan.direction === 'wait' || blockReason) return;
     const id = uid();
     add({
       id,
@@ -125,7 +138,7 @@ export default function SymbolPage() {
       entryPrice,
       stake,
       leverage: lev,
-      qty: paperQty,
+      qty,
       stop: plan.stop,
       tp1: plan.tp1,
       tp2: plan.tp2,
@@ -133,6 +146,7 @@ export default function SymbolPage() {
       entryLow: plan.entryLow,
       entryHigh: plan.entryHigh,
       confidence: plan.confidence,
+      riskMoney,
       openedAt: Date.now(),
       status: 'open',
     });
@@ -147,7 +161,7 @@ export default function SymbolPage() {
       `Вход зоной: ${fmt(plan.entryLow, priceDecimals)} – ${fmt(plan.entryHigh, priceDecimals)} (середина ${fmt(plan.entryMid, priceDecimals)})`,
       `Стоп: ${fmt(plan.stop, priceDecimals)}`,
       `TP1 ${fmt(plan.tp1, priceDecimals)} (1R) / TP2 ${fmt(plan.tp2, priceDecimals)} (2R) / TP3 ${fmt(plan.tp3, priceDecimals)} (3R)`,
-      `Риски: ${plan.risks.join(' | ')}`,
+      `Риски: ${allRisks.join(' | ')}`,
       'Не финансовая рекомендация.',
     ].join('\n');
     try {
@@ -221,7 +235,13 @@ export default function SymbolPage() {
               setStake={setStake}
               lev={lev}
               setLev={setLev}
-              qty={paperQty}
+              qty={qty}
+              deposit={deposit}
+              riskPct={riskPct}
+              setRiskPct={setRiskPct}
+              riskMoney={riskMoney}
+              marginNeeded={marginNeeded}
+              blockReason={blockReason}
               onOpen={openPaper}
             />
           )}
@@ -337,7 +357,7 @@ export default function SymbolPage() {
           <section className="cols">
             <div className="detail">
               <h3><Term t="risks" label="Риски" /></h3>
-              <TermList items={plan.risks} />
+              <TermList items={allRisks} />
             </div>
             <div className="detail">
               <h3><Term t="invalidation" label="Инвалидация" /></h3>

@@ -31,6 +31,8 @@ const isSortKey = (v: unknown): v is SortKey =>
 const isSortDir = (v: unknown): v is 1 | -1 => v === 1 || v === -1;
 const isRefresh = (v: unknown): v is number =>
   typeof v === 'number' && [0, 15, 30, 60, 120, 300, 50, 70, 80, 90].includes(v);
+const isConf = (v: unknown): v is number =>
+  typeof v === 'number' && [0, 50, 60, 70, 80, 90].includes(v);
 
 export default function ScreenerPage() {
   const navigate = useNavigate();
@@ -41,7 +43,7 @@ export default function ScreenerPage() {
   const [sortKey, setSortKey] = useSessionState<SortKey>('screener:sortKey', 'score', isSortKey);
   const [sortDir, setSortDir] = useSessionState<1 | -1>('screener:sortDir', -1, isSortDir);
   const [refreshSec, setRefreshSec] = useSessionState<number>('screener:refresh', 60, isRefresh);
-  const [minConf, setMinConf] = useSessionState<number>('screener:minConf', 80, isRefresh);
+  const [minConf, setMinConf] = useSessionState<number>('screener:minConf', 80, isConf);
 
   const refreshMs = refreshSec === 0 ? false : refreshSec * 1000;
   const tickers = useTickers(category, refreshMs);
