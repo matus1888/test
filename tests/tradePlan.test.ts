@@ -17,7 +17,7 @@ describe('buildTradePlan: долгий сетап', () => {
   it('направление и уверенность', () => {
     expect(plan.direction).toBe('long');
     expect(plan.confidence).toBeGreaterThanOrEqual(8);
-    expect(plan.confidence).toBeLessThanOrEqual(92);
+    expect(plan.confidence).toBeLessThanOrEqual(96);
   });
 
   it('структура уровней: стоп ниже зоны, тейки по возрастанию, R-риски', () => {
@@ -90,7 +90,7 @@ describe('buildTradePlan: wait-режим', () => {
 
   it('confidence в допустимых пределах даже для wait', () => {
     expect(plan.confidence).toBeGreaterThanOrEqual(8);
-    expect(plan.confidence).toBeLessThanOrEqual(92);
+    expect(plan.confidence).toBeLessThanOrEqual(96);
   });
 
   it('инвалидация для wait описывает пробой границ', () => {
@@ -115,7 +115,7 @@ describe('buildTradePlan: EMA', () => {
 });
 
 describe('buildTradePlan: инварианты на случайных рядах', () => {
-  it('все числовые поля конечны; тейки упорядочены по направлению; confidence в пределах 8..92', () => {
+  it('все числовые поля конечны; тейки упорядочены по направлению; confidence в пределах 8..96', () => {
     for (let seed = 1; seed <= 40; seed++) {
       const series = randomSeries(200, seed);
       const m = computeMetrics(series);
@@ -127,7 +127,7 @@ describe('buildTradePlan: инварианты на случайных ряда�
       expect(Number.isFinite(p.atr)).toBe(true);
       expect(Number.isFinite(p.riskDist)).toBe(true);
       expect(p.confidence).toBeGreaterThanOrEqual(8);
-      expect(p.confidence).toBeLessThanOrEqual(92);
+      expect(p.confidence).toBeLessThanOrEqual(96);
       expect(Number.isFinite(p.entryLow)).toBe(true);
       expect(Number.isFinite(p.entryHigh)).toBe(true);
       if (p.direction === 'long') {
@@ -194,7 +194,32 @@ describe('htfRisk: старшие таймфреймы', () => {
   });
 });
 
-describe('buildTradePlan: horizon', () => {
+describe('buildTradePlan: фильтры качества (жёсткие ворота)', () => {
+  const series = upSeries(200, 100, 0.5);
+  const strong = () => computeMetrics(series)!;
+
+  it('слабый R² отменяет направление — wait', () => {
+    const p = buildTradePlan(series, { ...strong(), trendR2: 0.2 }, 'linear', null, '5');
+    expect(p?.direction).toBe('wait');
+  });
+
+  it('мёртвый объём отменяет направление — wait', () => {
+    const p = buildTradePlan(series, { ...strong(), volumeRatio: 0.4 }, 'linear', null, '5');
+    expect(p?.direction).toBe('wait');
+  });
+
+  it('ураганная волатильность (ATR%) отменяет направление — wait', () => {
+    const p = buildTradePlan(series, { ...strong(), atrPct: 9 }, 'linear', null, '5');
+    expect(p?.direction).toBe('wait');
+  });
+
+  it('сильный чистый ряд проходит фильтры → long', () => {
+    const p = planFor(series, 'linear', null, '5');
+    expect(p.direction).toBe('long');
+  });
+});
+
+describe('buildTradePlan: горизонты (horizonForInterval)', () => {
   it('маппинг интервалов на горизонты', () => {
     expect(horizonForInterval('1')).toMatch(/Скальп/);
     expect(horizonForInterval('5')).toMatch(/Скальп/);

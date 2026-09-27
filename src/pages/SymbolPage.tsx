@@ -14,7 +14,7 @@ import {
 } from '../api/bybit';
 import { computeMetrics } from '../lib/metrics';
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
-import { setupCls, setupText } from '../lib/ui';
+import { setupCls, setupText, rowKeyProps } from '../lib/ui';
 import { buildTradePlan, htfRisk } from '../lib/tradePlan';
 import StrategyChart from '../components/StrategyChart';
 import Term from '../components/Term';
@@ -23,7 +23,12 @@ import QuickTrade from '../components/QuickTrade';
 import { ExternalIcon } from '../components/icons';
 import { useSessionState } from '../hooks/useSessionState';
 import { usePaperPositions } from '../hooks/usePaper';
-import { canOpenPosition, uid } from '../lib/paper';
+import {
+  entryBlockReason,
+  liquidationPrice,
+  liqToStopRatio,
+  makePaperPosition,
+} from '../lib/paper';
 
 const isPositiveNumber = (v: unknown): v is number => typeof v === 'number' && v > 0;
 
@@ -92,7 +97,6 @@ export default function SymbolPage() {
         const p = data && m ? buildTradePlan(data, m, category, ticker?.fundingRate ?? null, iv) : null;
         return { interval: iv, plan: p };
       }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [tfKlines, category, ticker],
   );
   const tfPending = tfKlines.filter((q) => q.isPending).length;
@@ -116,41 +120,28 @@ export default function SymbolPage() {
   // Исполнение по рынку завышало бы вход и урезало реализованный R тейков.
   const entryPrice = plan ? plan.entryMid : 0;
   const marginNeeded = entryPrice > 0 && lev > 0 ? (qty * entryPrice) / lev : 0;
-  const limitReason = plan && plan.direction !== 'wait'
-    ? canOpenPosition(positions, { symbol, category, interval, direction: plan.direction })
+  // Ликвидация и её запас относительно стопа: высокие плечи на широких стопах дают
+  // margin call раньше стопа — классическая проблема, которую этот guard убирает.
+  const liq = plan && plan.direction !== 'wait' && entryPrice > 0 && lev > 0
+    ? liquidationPrice({ direction: plan.direction, entryPrice, leverage: lev })
+    : null;
+  const liqRatio = liq != null && plan && plan.direction !== 'wait'
+    ? liqToStopRatio(entryPrice, plan.stop, plan.direction, lev)
     : null;
   const blockReason = !plan || plan.direction === 'wait'
     ? 'Нет направленного сетапа'
-    : riskMoney <= 0
-      ? 'Укажи риск больше нуля'
-      : marginNeeded > stake
-        ? `Не хватает маржи: нужно ${fmt(marginNeeded)} $ при ×${lev} — подними ставку или плечо, либо снизь риск`
-        : limitReason;
+    : entryBlockReason(
+        positions,
+        { symbol, category, interval, direction: plan.direction },
+        plan,
+        { deposit, riskPct, stake, leverage: lev },
+      );
   const openPaper = () => {
     if (!plan || plan.direction === 'wait' || blockReason) return;
-    const id = uid();
-    add({
-      id,
-      symbol,
-      category,
-      interval,
-      direction: plan.direction,
-      entryPrice,
-      stake,
-      leverage: lev,
-      qty,
-      stop: plan.stop,
-      tp1: plan.tp1,
-      tp2: plan.tp2,
-      tp3: plan.tp3,
-      entryLow: plan.entryLow,
-      entryHigh: plan.entryHigh,
-      confidence: plan.confidence,
-      riskMoney,
-      openedAt: Date.now(),
-      status: 'open',
-    });
-    navigate(`/paper/${id}`);
+    const pos = makePaperPosition(symbol, category, interval, plan, { deposit, riskPct, stake, leverage: lev });
+    const ok = add(pos);
+    if (!ok) return; // блокировку мог «опередить» другой клик — дубль не создаём
+    navigate(`/paper/${pos.id}`);
   };
 
   const copyPlan = async () => {
@@ -242,6 +233,8 @@ export default function SymbolPage() {
               riskMoney={riskMoney}
               marginNeeded={marginNeeded}
               blockReason={blockReason}
+              liq={liq}
+              liqRatio={liqRatio}
               onOpen={openPaper}
             />
           )}
@@ -265,7 +258,7 @@ export default function SymbolPage() {
                 </thead>
                 <tbody>
                   {tfPlans.map(({ interval: iv, plan: p }) => (
-                    <tr key={iv} onClick={() => setInterval(iv)} className={iv === interval ? 'sel' : ''}>
+                    <tr key={iv} {...rowKeyProps(() => setInterval(iv), `Переключить на ${INTERVAL_LABELS[iv]}`)} className={iv === interval ? 'sel' : ''}>
                       <td className="sym">{INTERVAL_LABELS[iv]}</td>
                       <td className={setupCls(p?.direction ?? null)}>{p ? setupText(p.direction) : '…'}</td>
                       <td>{p ? `${p.confidence}%` : '…'}</td>
@@ -298,6 +291,9 @@ export default function SymbolPage() {
                 : <>
                     <div className="lvl"><span><Term t="stop" label="Стоп" /></span><b className="neg">{fmt(plan.stop, priceDecimals)} ({pctFrom(plan.stop)})</b></div>
                     <p className="state">Риск от середины входа: {fmt(plan.riskDist, priceDecimals)} · ~{(plan.riskDist / plan.price * 100).toFixed(2)}%.</p>
+                    {liq != null && (
+                      <div className="lvl"><span><Term t="liq" label="Ликвидация ~" /></span><b className="neg">{fmt(liq, priceDecimals)}{liqRatio != null ? ` (×${lev}, ${liqRatio.toFixed(2)}x к стопу)` : ''}</b></div>
+                    )}
                   </>}
             </div>
             <div className="card">

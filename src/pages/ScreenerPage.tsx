@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   CATEGORIES,
@@ -10,15 +10,19 @@ import {
   type Interval,
 } from '../api/bybit';
 import { useKlines, useTickers } from '../hooks/useMarket';
+import { usePaperPositions } from '../hooks/usePaper';
 import { useSessionState } from '../hooks/useSessionState';
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
-import { numCls, setupCls, setupText } from '../lib/ui';
+import { entryBlockReason, makePaperPosition } from '../lib/paper';
+import { numCls, rowKeyProps, setupCls, setupText } from '../lib/ui';
 import { CAT_GLOSS, CONF_OPTIONS, REFRESH_OPTIONS } from '../lib/options';
 import {
   COLUMNS,
   buildRows,
   filterByConfidence,
+  priorityOf,
   sortRows,
+  type Row,
   type SortKey,
 } from '../lib/screener';
 import Term from '../components/Term';
@@ -33,17 +37,25 @@ const isRefresh = (v: unknown): v is number =>
   typeof v === 'number' && [0, 15, 30, 60, 120, 300, 50, 70, 80, 90].includes(v);
 const isConf = (v: unknown): v is number =>
   typeof v === 'number' && [0, 50, 60, 70, 80, 90].includes(v);
+const isPositiveNumber = (v: unknown): v is number => typeof v === 'number' && v > 0;
 
 export default function ScreenerPage() {
   const navigate = useNavigate();
+  const { positions, add } = usePaperPositions();
+  const [entryMsg, setEntryMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [category, setCategory] = useSessionState<Category>('screener:category', 'linear', isCategory);
   const [interval, setInterval] = useSessionState<Interval>('screener:interval', '5', isInterval);
   const [maxSymbols, setMaxSymbols] = useSessionState<number>('screener:limit', 50, isLimit);
   const [search, setSearch] = useSessionState<string>('screener:search', '', isString);
-  const [sortKey, setSortKey] = useSessionState<SortKey>('screener:sortKey', 'score', isSortKey);
+  const [sortKey, setSortKey] = useSessionState<SortKey>('screener:sortKey', 'priority', isSortKey);
   const [sortDir, setSortDir] = useSessionState<1 | -1>('screener:sortDir', -1, isSortDir);
   const [refreshSec, setRefreshSec] = useSessionState<number>('screener:refresh', 60, isRefresh);
   const [minConf, setMinConf] = useSessionState<number>('screener:minConf', 80, isConf);
+  // Параметры быстрого входа — те же ключи, что на странице символа (общая сессия).
+  const [deposit] = useSessionState<number>('symbol:deposit', 1000, isPositiveNumber);
+  const [riskPct] = useSessionState<number>('symbol:riskPct', 1, isPositiveNumber);
+  const [stake] = useSessionState<number>('paper:stake', 100, isPositiveNumber);
+  const [lev] = useSessionState<number>('paper:leverage', 3, isPositiveNumber);
 
   const refreshMs = refreshSec === 0 ? false : refreshSec * 1000;
   const tickers = useTickers(category, refreshMs);
@@ -76,6 +88,24 @@ export default function ScreenerPage() {
 
   const openSymbol = (s: string) => {
     navigate(`/s/${category}/${encodeURIComponent(s)}?interval=${interval}`);
+  };
+
+  /** Быстрый вход из таблицы: берёт план строки и текущие параметры риска/плеча. */
+  const quickEntry = (r: Row) => {
+    if (!r.plan) return;
+    const direction: 'long' | 'short' = r.plan.direction === 'short' ? 'short' : 'long';
+    const draft = { symbol: r.symbol, category, interval, direction };
+    const reason = entryBlockReason(positions, draft, r.plan, { deposit, riskPct, stake, leverage: lev });
+    if (reason) {
+      setEntryMsg({ text: `${r.symbol}: ${reason}`, ok: false });
+      return;
+    }
+    const pos = makePaperPosition(r.symbol, category, interval, r.plan, { deposit, riskPct, stake, leverage: lev });
+    if (!add(pos)) {
+      setEntryMsg({ text: `${r.symbol}: вход заблокирован — дубль или лимит`, ok: false });
+      return;
+    }
+    setEntryMsg({ text: `${r.symbol}: вход открыт · риск ${fmt(pos.riskMoney)}$ ×${pos.leverage}`, ok: true });
   };
 
   const klineLoading = klines.some((k) => k.loading);
@@ -137,6 +167,10 @@ export default function ScreenerPage() {
         </p>
       )}
 
+      {entryMsg && (
+        <p className={`state ${entryMsg.ok ? '' : 'err'}`}>{entryMsg.ok ? '✓ ' : '✕ '}{entryMsg.text}</p>
+      )}
+
       <div className="table-wrap">
         <table>
           <thead>
@@ -150,12 +184,23 @@ export default function ScreenerPage() {
           </thead>
           <tbody>
             {visible.map((r) => (
-              <tr key={r.symbol} onClick={() => openSymbol(r.symbol)}>
+              <tr key={r.symbol} {...rowKeyProps(() => openSymbol(r.symbol), `Открыть план ${r.symbol}`)}>
                 <td className="sym">{r.symbol}</td>
                 <td>{fmt(r.m?.lastPrice ?? r.price, r.price < 1 ? 5 : 2)}</td>
                 <td>{fmtCompact(r.turnover)}</td>
-                <td className={setupCls(r.direction)}>{setupText(r.direction)}</td>
+                <td className={setupCls(r.direction)}>
+                  {setupText(r.direction)}
+                  {r.plan && r.plan.direction !== 'wait' && (
+                    <button
+                      type="button"
+                      className="btn btn-sm quick-entry"
+                      onClick={(e) => { e.stopPropagation(); quickEntry(r); }}
+                      title="Быстрый вход: размер от риска, вход по середине зоны, текущие ставка/плечо"
+                    >Вход</button>
+                  )}
+                </td>
                 <td>{r.confidence == null ? '—' : `${r.confidence}%`}</td>
+                <td className="score">{r.direction === 'long' || r.direction === 'short' ? priorityOf(r) : '—'}</td>
                 <td>{r.m ? fmt(r.m.volatilityRange) : (r.klineLoading ? '…' : '—')}</td>
                 <td>{r.m ? fmt(r.m.volatilityStd) : '—'}</td>
                 <td>{r.m ? fmt(r.m.atrPct) : '—'}</td>
@@ -178,6 +223,7 @@ export default function ScreenerPage() {
       <footer className="foot">
         Данные: публичный API Bybit V5 (тикеры + свечи). Метрики и план считаются в браузере по 200 свечам выбранного таймфрейма.
         Скор = |тренд|·(0,3+R²) + волат.·0,3 + min(|импульс|,20)·0,2. Клик по строке — торговый план.
+        Приоритет = уверенность + чистота/сила тренда + объём − штрафы (перегрев RSI, растянутая серия, слабый объём, шорты).
       </footer>
     </div>
   );

@@ -9,6 +9,11 @@ export type Direction = 'long' | 'short' | 'wait';
 export const LONG_MIN_SCORE = 4;
 export const SHORT_MIN_SCORE = 5;
 
+/** Фильтры качества направленного сетапа (жёсткие ворота, а не штрафы). */
+export const MIN_TREND_R2 = 0.5;      // чистота тренда: ниже — шум/боковик
+export const MIN_VOLUME_RATIO = 0.9;  // участие объёма: без денег движение недостоверно
+export const MAX_ATR_PCT = 7;         // потолок волатильности: широкие стопы и гэпы
+
 export interface TradePlan {
   direction: Direction;
   confidence: number; // 0..100
@@ -125,13 +130,31 @@ export function buildTradePlan(
   if (m.volumeRatio > 0.7) shortScore += 1;
 
   const allowShort = category !== 'spot';
+  // Жёсткие фильтры качества: слабый тренд, мёртвый объём и ураганная
+  // волатильность — вне зависимости от набранных очков в wait.
+  const qualityOk = m.trendR2 >= MIN_TREND_R2
+    && m.volumeRatio >= MIN_VOLUME_RATIO
+    && m.atrPct <= MAX_ATR_PCT;
   let direction: Direction = 'wait';
-  if (allowShort && shortScore > longScore && shortScore >= SHORT_MIN_SCORE) direction = 'short';
-  else if (longScore > shortScore && longScore >= LONG_MIN_SCORE) direction = 'long';
-  else if (!allowShort && longScore >= LONG_MIN_SCORE) direction = 'long';
+  if (qualityOk && allowShort && shortScore > longScore && shortScore >= SHORT_MIN_SCORE) direction = 'short';
+  else if (qualityOk && longScore > shortScore && longScore >= LONG_MIN_SCORE) direction = 'long';
+  else if (qualityOk && !allowShort && longScore >= LONG_MIN_SCORE) direction = 'long';
 
   const best = direction === 'long' ? longScore : direction === 'short' ? shortScore : Math.max(longScore, shortScore);
-  const confidence = Math.round(Math.min(92, Math.max(8, (best / 7) * 100 + (m.trendR2 > 0.6 ? 6 : 0))));
+  // Модернизированная уверенность: база из очков сетапа (дискретные фильтры) смешивается
+  // с непрерывным качеством тренда (R², наклон, объём), поэтому значения не слипаются
+  // в кучки из-за целых очков и бинарного бонуса («все по 92»). Чем выше — тем лучше.
+  const base = (best / 7) * 100;
+  const quality =
+    0.4 * Math.min(1, m.trendR2)
+    + 0.3 * Math.min(1, Math.abs(m.trendSlopePct) / 0.5)
+    + 0.3 * Math.min(1, m.volumeRatio / 2);
+  // Плавный штраф за RSI вдали от «сладкой зоны» направления (покупка на пике / продажа на дне).
+  const rsiFar = direction === 'long' ? Math.max(0, m.rsi - 62) : Math.max(0, 38 - m.rsi);
+  // Плавные штрафы вместо жёсткого вето: перегрев RSI и растянутая серия снижают
+  // уверенность, но не выкидывают сильный тренд целиком.
+  const streakPenalty = Math.abs(m.streak) >= 6 ? 4 : 0;
+  const confidence = Math.round(Math.min(96, Math.max(8, base * 0.65 + quality * 35 - Math.min(10, rsiFar * 0.5) - streakPenalty)));
 
   const regime = up
     ? 'Восходящий тренд (цена > EMA20 > EMA50)'

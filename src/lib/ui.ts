@@ -1,3 +1,4 @@
+import { type KeyboardEvent } from 'react';
 import type { Direction } from './tradePlan';
 
 /** CSS-класс для раскраски чисел: рост/падение. */
@@ -18,4 +19,21 @@ export function setupCls(d: Direction | null): string {
   if (d === 'long') return 'setup-long';
   if (d === 'short') return 'setup-short';
   return 'setup-wait';
+}
+
+/** Сделать кликабельную строку таблицы доступной с клавиатуры: Tab + Enter/Space.
+ *  Enter/Space на вложенных элементах (например, кнопка удаления) строку не активирует. */
+export function rowKeyProps(onActivate: () => void, label?: string) {
+  return {
+    tabIndex: 0,
+    'aria-label': label,
+    onClick: onActivate,
+    onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
+      if (e.target !== e.currentTarget) return;
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        onActivate();
+      }
+    },
+  };
 }

@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Пакеты ставит bun — lock от npm не нужен
+package-lock.json
+
+# Бинарники Go-бота, собранные CI/локально (в сайт попадают через public/bot при деплое)
+# public/bot/
+# bot/bin/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

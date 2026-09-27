@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
-import { applySettle, type PaperPosition, type SettleInfo } from '../lib/paper';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { applySettle, canOpenPosition, type DraftKey, type PaperPosition, type SettleInfo } from '../lib/paper';
 
 const KEY = 'paper:positions:v1';
+// Событие для оповещения экземпляров хука в ЭТОЙ вкладке: нативный `storage`-event
+// срабатывает только между вкладками, поэтому без него PaperHeader и страницы
+// расходились бы до перезагрузки.
+const CHANGED_EVENT = 'paper:positions:changed';
 
 function load(): PaperPosition[] {
   try {
@@ -26,31 +30,59 @@ function save(list: PaperPosition[]): void {
   }
 }
 
-/** Бумажные позиции в localStorage + синхронизация между вкладками. */
+function emitChanged(): void {
+  try {
+    window.dispatchEvent(new Event(CHANGED_EVENT));
+  } catch {
+    /* noop */
+  }
+}
+
+/** Бумажные позиции в localStorage + синхронизация между вкладками и компонентами одной вкладки. */
 export function usePaperPositions() {
   const [positions, setPositions] = useState<PaperPosition[]>(load);
+  // Актуальный список для синхронных проверок без ожидания пере-рендера.
+  const positionsRef = useRef<PaperPosition[]>(positions);
 
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === KEY) setPositions(load());
+    const reload = () => setPositions(load());
+    window.addEventListener('storage', reload);
+    window.addEventListener(CHANGED_EVENT, reload);
+    return () => {
+      window.removeEventListener('storage', reload);
+      window.removeEventListener(CHANGED_EVENT, reload);
     };
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
   }, []);
+
+  useEffect(() => {
+    positionsRef.current = positions;
+  }, [positions]);
 
   const update = useCallback((fn: (prev: PaperPosition[]) => PaperPosition[]) => {
-    setPositions((prev) => {
-      const next = fn(prev);
-      if (next === prev) return prev;
-      save(next);
-      return next;
-    });
+    const next = fn(positionsRef.current);
+    if (next === positionsRef.current) return;
+    positionsRef.current = next;
+    setPositions(next);
+    save(next);
+    emitChanged();
   }, []);
 
-  const add = useCallback(
-    (p: PaperPosition) => update((prev) => [p, ...prev]),
-    [update],
-  );
+  /**
+   * Открытие позиции. Проверяет дубли/лимиты по самому свежему списку (не из render-closure),
+   * поэтому двойной клик по кнопке не создаст два одинаковых входа. Возвращает false,
+   * если вход заблокирован.
+   */
+  const add = useCallback((p: PaperPosition): boolean => {
+    const draft: DraftKey = {
+      symbol: p.symbol,
+      category: p.category,
+      interval: p.interval,
+      direction: p.direction,
+    };
+    if (canOpenPosition(positionsRef.current, draft)) return false;
+    update((prev) => [p, ...prev]);
+    return true;
+  }, [update]);
 
   const closeManual = useCallback(
     (id: string, price: number, time: number) =>

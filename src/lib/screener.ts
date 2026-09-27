@@ -1,9 +1,9 @@
 import type { Candle, Category, Interval, Ticker } from '../api/bybit';
 import { computeMetrics, type SymbolMetrics } from './metrics';
-import { buildTradePlan, type Direction } from './tradePlan';
+import { buildTradePlan, type Direction, type TradePlan } from './tradePlan';
 
 export type SortKey =
-  | 'symbol' | 'price' | 'turnover' | 'setup' | 'confidence'
+  | 'symbol' | 'price' | 'turnover' | 'setup' | 'confidence' | 'priority'
   | 'volatilityRange' | 'volatilityStd' | 'atrPct' | 'changePct'
   | 'momentumPct' | 'trendSlopePct' | 'rsi' | 'volumeRatio' | 'score' | 'fundingRate';
 
@@ -13,6 +13,7 @@ export const COLUMNS: { key: SortKey; label: string; gloss: string }[] = [
   { key: 'turnover', label: 'Оборот 24ч', gloss: 'turnover' },
   { key: 'setup', label: 'Сетап', gloss: 'direction' },
   { key: 'confidence', label: 'Увер. %', gloss: 'confidence' },
+  { key: 'priority', label: 'Приоритет', gloss: 'priority' },
   { key: 'volatilityRange', label: 'Волат. %', gloss: 'volatilityRange' },
   { key: 'volatilityStd', label: 'Волат. σ %', gloss: 'volatilityStd' },
   { key: 'atrPct', label: 'ATR %', gloss: 'atr' },
@@ -35,6 +36,8 @@ export interface Row {
   m: SymbolMetrics | null;
   direction: Direction | null;
   confidence: number | null;
+  /** Полный план на символ — для быстрого входа прямо из таблицы. */
+  plan?: TradePlan | null;
   klineError: string | null;
   klineLoading: boolean;
 }
@@ -71,10 +74,38 @@ export function buildRows(
       // Уверенность показываем только для направленного сетапа:
       // у wait-плана её нет, в таблице будет «—».
       confidence: plan && plan.direction !== 'wait' ? plan.confidence : null,
+      plan,
       klineError: k?.error ?? null,
       klineLoading: k?.loading ?? false,
     };
   });
+}
+
+/**
+ * Приоритет входа «куда действительно стоит входить» (0..100) — сортировка скринера по умолчанию.
+ * База — уверенность сетапа; сверху добавляются чистота тренда (R²) и сила наклона, участие объёма;
+ * штрафы за перегрев RSI (покупка на пике / продажа на дне), растянутую серию, слабый объём и шорты
+ * (на бэктесте шорты систематически хуже лонгов). wait/без данных → 0.
+ */
+export function priorityOf(r: Row): number {
+  if ((r.direction !== 'long' && r.direction !== 'short') || r.confidence == null || r.m == null) return 0;
+  const m = r.m;
+  // Уверенность 0..100 → 0..60 баллов.
+  let p = 0.6 * r.confidence;
+  // Чистота тренда: R² 0.3..1 → 0..35.
+  p += Math.min(35, Math.max(0, (m.trendR2 - 0.3) * 50));
+  // Сила тренда: |наклон| % за свечу 0..0.6 → 0..15.
+  p += Math.min(15, Math.abs(m.trendSlopePct) * 25);
+  // Участие объёма: volumeRatio 0..2 → 0..12.
+  p += Math.min(12, Math.max(0, m.volumeRatio * 6));
+  // Штрафы: перегретый RSI, растянутое движение, отсутствие участников.
+  if (m.rsi > 78) p -= 12;
+  else if (m.rsi < 22) p -= 12;
+  if (Math.abs(m.streak) >= 6) p -= 8;
+  if (m.volumeRatio < 0.5) p -= 10;
+  // Бэктест: шорты в среднем слабее лонгов.
+  if (r.direction === 'short') p -= 6;
+  return Math.round(Math.min(100, Math.max(0, p)));
 }
 
 function sortVal(r: Row, sortKey: SortKey): number | string {
@@ -84,6 +115,7 @@ function sortVal(r: Row, sortKey: SortKey): number | string {
     case 'turnover': return r.turnover;
     case 'setup': return r.direction ? DIR_WEIGHT[r.direction] : Number.NEGATIVE_INFINITY;
     case 'confidence': return r.confidence ?? Number.NEGATIVE_INFINITY;
+    case 'priority': return priorityOf(r);
     case 'fundingRate': return r.fundingRate ?? Number.NEGATIVE_INFINITY;
     case 'score': return r.m?.score ?? Number.NEGATIVE_INFINITY;
     case 'volatilityRange': return r.m?.volatilityRange ?? Number.NEGATIVE_INFINITY;

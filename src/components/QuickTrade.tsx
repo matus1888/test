@@ -21,13 +21,15 @@ interface Props {
   riskMoney: number;
   marginNeeded: number;
   blockReason: string | null;
+  liq?: number | null;
+  liqRatio?: number | null;
   onOpen: () => void;
 }
 
 /** Быстрый вход в один клик: риск в $, ставка/плечо, кнопка. Липкая, висит над графиком при скролле. */
 export default function QuickTrade({
   direction, entryPrice, decimals, stake, setStake, lev, setLev, qty,
-  deposit, riskPct, setRiskPct, riskMoney, marginNeeded, blockReason, onOpen,
+  deposit, riskPct, setRiskPct, riskMoney, marginNeeded, blockReason, liq, liqRatio, onOpen,
 }: Props) {
   const long = direction === 'long';
   const setRiskMoney = (v: number) => {
@@ -69,7 +71,9 @@ export default function QuickTrade({
           ×{n}
         </button>
       ))}
-      <span className="muted">{fmt(qty, 4)} · {fmtCompact(qty * entryPrice)} $ по ~{fmt(entryPrice, decimals)} · маржа {fmt(marginNeeded)} $</span>
+      <span className="muted">{fmt(qty, 4)} · {fmtCompact(qty * entryPrice)} $ по ~{fmt(entryPrice, decimals)} · маржа {fmt(marginNeeded)} $
+        {liq != null ? ` · liq ~${fmt(liq, decimals)}${liqRatio != null ? ` (${liqRatio.toFixed(2)}x к стопу)` : ''}` : ''}
+      </span>
       <button className={`btn ${long ? 'open-long' : 'open-short'}`} onClick={onOpen} disabled={blockReason != null}>
         <PlusIcon /> Открыть
       </button>

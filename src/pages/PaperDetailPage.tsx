@@ -116,9 +116,11 @@ export default function PaperDetailPage() {
           ? `Задет стоп по ${fmt(e.price, decimals)}`
           : e.type === 'breakeven'
             ? `Сработал безубыток по ${fmt(e.price, decimals)}`
-            : e.type === 'tp1' || e.type === 'tp2'
-              ? legText(e.type, e.price, TP_FRACS[e.type])
-              : `Достигнут ${eventLabel(e.type)} по ${fmt(e.price, decimals)}`,
+            : e.type === 'liq'
+              ? `Ликвидация: позиция закрыта принудительно по ${fmt(e.price, decimals)}`
+              : e.type === 'tp1' || e.type === 'tp2'
+                ? legText(e.type, e.price, TP_FRACS[e.type])
+                : `Достигнут ${eventLabel(e.type)} по ${fmt(e.price, decimals)}`,
       })) ?? []),
   ];
   if (pos.status === 'closed') {
@@ -174,9 +176,11 @@ export default function PaperDetailPage() {
           )}
           <div className="lvl"><span><Term t="fee" label="Комиссия ~" /></span><b>−{fmt(r.fee)}</b></div>
           <div className="lvl"><span>P&L net, $</span><b className={r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : ''}>{r.net >= 0 ? '+' : ''}{fmt(r.net)}</b></div>
+          <div className="lvl"><span><Term t="margin" label="P&L net, % к марже" /></span><b>{fmtPct(r.netMarginPct, 1)}</b></div>
           <div className="lvl"><span>P&L net, % к ставке</span><b>{fmtPct(r.netPct, 1)}</b></div>
           <div className="lvl"><span><Term t="rMultiple" label="R-мультипл net" /></span><b>{fmt(r.netR, 2)}R</b></div>
           <div className="lvl"><span><Term t="holding" label="Время в позиции" /></span><b>{fmtDuration(exitTime - pos.openedAt)}</b></div>
+          <div className="lvl"><span><Term t="notional" label="Номинал / маржа" /></span><b>{fmtCompact(r.notional)} $ / {fmt(r.margin)} $</b></div>
         </div>
         <div className="card">
           <h3>Уровни плана</h3>
@@ -233,7 +237,7 @@ export default function PaperDetailPage() {
       </section>
 
       <footer className="foot">
-        Номинал позиции: {fmtCompact(pos.qty * pos.entryPrice)}. P&L считается от плеча: движение цены × количество, чистыми за вычетом комиссии за круг (тейкер). TP1 фиксирует 70%, TP2 — 20%, после TP1 стоп в безубытке. Линия LIQ — оценка ликвидации для изолированной маржи, не точная цена биржи.
+        Номинал позиции: {fmtCompact(pos.qty * pos.entryPrice)}. P&L в $ = движение цены × количество и не зависит от плеча; проценты — к марже (номинал/плечо). Линия LIQ — оценка ликвидации для изолированной маржи, не точная цена биржи. TP1 фиксирует 70%, TP2 — 20%, после TP1 стоп в безубытке.
       </footer>
     </div>
   );

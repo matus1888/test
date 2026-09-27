@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildRows, filterByConfidence, sortRows, COLUMNS, type Row } from '../src/lib/screener';
+import { buildRows, filterByConfidence, priorityOf, sortRows, COLUMNS, type Row } from '../src/lib/screener';
 import type { Category, Interval, Ticker } from '../src/api/bybit';
 import { flatSeries, upSeries } from './helpers/candles';
 
@@ -40,6 +40,7 @@ describe('buildRows', () => {
     expect(aa.price).toBe(10);
     expect(aa.m).not.toBeNull();
     expect(aa.direction).toBe('long');
+    expect(aa.plan?.direction).toBe('long');
     expect(aa.confidence).toBeGreaterThanOrEqual(8);
     expect(aa.klineError).toBeNull();
     expect(aa.klineLoading).toBe(false);
@@ -150,5 +151,52 @@ describe('COLUMNS', () => {
   it('ключи колонок соответствуют SortKey', () => {
     expect(COLUMNS.length).toBeGreaterThan(0);
     for (const c of COLUMNS) expect(c.key.length).toBeGreaterThan(0);
+  });
+
+  it('колонка «Приоритет» на месте', () => {
+    expect(COLUMNS.some((c) => c.key === 'priority')).toBe(true);
+  });
+});
+
+describe('priorityOf', () => {
+  it('wait или без данных → 0', () => {
+    const base: Row = { symbol: 'X', price: 1, turnover: 1, fundingRate: null, m: null, direction: null, confidence: null, klineError: null, klineLoading: false };
+    expect(priorityOf({ ...base, direction: 'wait' })).toBe(0);
+    expect(priorityOf({ ...base, direction: 'long', confidence: 90 })).toBe(0); // m нет
+  });
+
+  it('направленный сетап с чистыми трендом и объёмом получает высокий приоритет', () => {
+    const rows = buildRows(
+      ['UP', 'FLAT'],
+      [ticker('UP'), ticker('FLAT')],
+      [kline(upSeries(200)), kline(flatSeries(200))],
+      CAT,
+      IV,
+    );
+    const up = rows[0];
+    const flat = rows[1];
+    expect(up.direction).toBe('long');
+    expect(priorityOf(flat)).toBe(0);
+    expect(priorityOf(up)).toBeGreaterThan(50);
+  });
+
+  it('шорт дисконтируется ровно на 6 баллов относительно лонга с теми же метриками', () => {
+    const rows = buildRows(['UP'], [ticker('UP')], [kline(upSeries(200))], CAT, IV);
+    const longRow = rows[0];
+    const shortRow: Row = { ...longRow, direction: 'short' };
+    expect(priorityOf(shortRow)).toBe(Math.max(0, priorityOf(longRow) - 6));
+  });
+
+  it('сортировка по умолчанию ставит лучший вход выше', () => {
+    const rows = buildRows(
+      ['UP', 'FLAT'],
+      [ticker('UP'), ticker('FLAT')],
+      [kline(upSeries(200)), kline(flatSeries(200))],
+      CAT,
+      IV,
+    );
+    const sorted = sortRows(rows, 'priority', -1);
+    expect(sorted[0].symbol).toBe('UP');
+    expect(priorityOf(sorted[0])).toBeGreaterThanOrEqual(priorityOf(sorted[1]));
   });
 });

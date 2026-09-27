@@ -3,6 +3,8 @@ import {
   applySettle,
   bookedPnl,
   canOpenPosition,
+  closeLabel,
+  entryBlockReason,
   evaluatePosition,
   eventLabel,
   feeOf,
@@ -10,7 +12,11 @@ import {
   fmtTime,
   legsOf,
   liquidationPrice,
+  liqToStopRatio,
+  makePaperPosition,
+  maxSafeLeverage,
   pnlOf,
+  positionMetrics,
   remainingFrac,
   settleOpen,
   totalPnlOf,
@@ -19,6 +25,7 @@ import {
   TAKER_FEE_RATE,
   type PaperPosition,
 } from '../src/lib/paper';
+import type { TradePlan } from '../src/lib/tradePlan';
 import { candle } from './helpers/candles';
 
 const T = 60_000;
@@ -380,11 +387,9 @@ describe('canOpenPosition: дубли и лимиты', () => {
     expect(canOpenPosition([pos()], { ...draft, interval: '15' }, NOW)).toBeNull();
   });
 
-  it('лимит открытых позиций: пятая разрешена, шестая запрещена', () => {
-    const four = Array.from({ length: 4 }, (_, i) => pos({ id: `p${i}`, symbol: `S${i}USDT` }));
-    expect(canOpenPosition(four, draft, NOW)).toBeNull();
-    const five = [...four, pos({ id: 'p4', symbol: 'S4USDT' })];
-    expect(canOpenPosition(five, draft, NOW)).toMatch(/лимит/i);
+  it('лимит открытых позиций: по умолчанию нет (тестовый режим)', () => {
+    const many = Array.from({ length: 12 }, (_, i) => pos({ id: `p${i}`, symbol: `S${i}USDT` }));
+    expect(canOpenPosition(many, draft, NOW)).toBeNull();
   });
 
   it('дневной убыток ниже лимита блокирует входы', () => {
@@ -424,6 +429,59 @@ describe('eventLabel', () => {
     expect(eventLabel('tp3')).toBe('TP3');
     expect(eventLabel('stop')).toBe('Стоп');
     expect(eventLabel('breakeven')).toBe('Б/У');
+    expect(eventLabel('liq')).toBe('LIQ');
+  });
+});
+
+describe('ликвидация и её запас относительно стопа', () => {
+  it('liqToStopRatio: безопасное плечо даёт запас > 1', () => {
+    // entry 100, stop 90, lev 2 → liq=50.25..., запас = (100-liq)/10
+    const liq = liquidationPrice({ direction: 'long', entryPrice: 100, leverage: 2 });
+    expect(liq).not.toBeNull();
+    expect(liqToStopRatio(100, 90, 'long', 2)).toBeCloseTo((100 - liq!) / 10, 10);
+    expect(liqToStopRatio(100, 90, 'long', 2)!).toBeGreaterThan(1);
+  });
+
+  it('liqToStopRatio: высокое плечо ставит ликвидацию ближе стопа (< 1)', () => {
+    // lev 25 → liq = 100·(24/25)/0.995 ≈ 96.48, запас = 3.52/10 ≈ 0.35
+    const ratio = liqToStopRatio(100, 90, 'long', 25);
+    expect(ratio).not.toBeNull();
+    expect(ratio!).toBeLessThan(1);
+  });
+
+  it('maxSafeLeverage: широкий стоп NILUSDT 8,1% допускает ~8,4x', () => {
+    const entry = 0.1364199299237837;
+    const stop = 0.12537800270471025;
+    const maxLev = maxSafeLeverage(entry, stop, 'long');
+    expect(maxLev).not.toBeNull();
+    // при ×3 запас большой, при ×10 уже недостаточный
+    expect(liqToStopRatio(entry, stop, 'long', 3)!).toBeGreaterThan(1.5);
+    expect(liqToStopRatio(entry, stop, 'long', 10)!).toBeLessThan(1.43);
+    expect(maxLev!).toBeGreaterThan(3);
+    expect(maxLev!).toBeLessThan(10);
+  });
+
+  it('евент/движок: ликвидация раньше стопа при опасном плече', () => {
+    const unsafe = pos({ leverage: 25 }); // liq ≈ 96.48 > стоп 90 → ликвидация ближе
+    const ev = evaluatePosition(unsafe, [candle(0, 95, { high: 96.5, low: 94 })]);
+    expect(ev.liqHit).toBe(true);
+    expect(ev.events.map((e) => e.type)).toEqual(['liq']);
+    const s = settleOpen(unsafe, [candle(0, 95, { high: 96.5, low: 94 })]);
+    expect(s?.closeReason).toBe('liq');
+  });
+
+  it('евент/движок: безопасная позиция закрывается стопом, не ликвидацией', () => {
+    const safe = pos(); // lev 2, liq 50.25 — далеко
+    const ev = evaluatePosition(safe, [candle(0, 92, { high: 95, low: 88 })]);
+    expect(ev.stopHit).toBe(true);
+    expect(ev.liqHit).toBe(false);
+    expect(ev.events.map((e) => e.type)).toEqual(['stop']);
+    expect(settleOpen(safe, [candle(0, 92, { high: 95, low: 88 })])?.closeReason).toBe('stop');
+  });
+
+  it('closeLabel: ликвидация', () => {
+    expect(closeLabel('liq')).toBe('Ликвидация');
+    expect(closeLabel('stop')).toBe('Стоп');
   });
 });
 
@@ -513,6 +571,30 @@ describe('частичный выход 70/20/10', () => {
 });
 
 describe('вспомогательные функции', () => {
+  it('positionMetrics: маржа = номинал/плечо', () => {
+    expect(positionMetrics(pos())).toEqual({ notional: 200, margin: 100 }); // ×2
+    expect(positionMetrics(pos({ leverage: 20 }))).toEqual({ notional: 200, margin: 10 });
+    expect(positionMetrics(pos({ leverage: 0 }))).toEqual({ notional: 200, margin: 200 }); // no-lev fallback
+  });
+
+  it('P&L в $ НЕ зависит от плеча; % к марже усиливается плечом', () => {
+    const base = pos();          // qty 2, entry 100, lev 2 → маржа 100
+    const lev20 = pos({ leverage: 20 }); // маржа 10
+    expect(pnlOf(base, 130).pnl).toBe(pnlOf(lev20, 130).pnl);        // 60 $
+    expect(pnlOf(lev20, 130).pnl).toBe(60);
+    expect(pnlOf(lev20, 130).pctMargin).toBeCloseTo(pnlOf(base, 130).pctMargin * 10, 6);
+    expect(pnlOf(lev20, 130).pct).toBeCloseTo(pnlOf(base, 130).pct, 10); // % к ставке не меняется
+    expect(totalPnlOf(base, 130).netR).toBeCloseTo(totalPnlOf(lev20, 130).netR, 8);
+  });
+
+  it('маржинальные метрики в totalPnlOf и pnlOf согласованы', () => {
+    const r = totalPnlOf(pos(), 130);
+    expect(r.notional).toBe(200);
+    expect(r.margin).toBe(100);
+    expect(r.pctMargin).toBeCloseTo((60 / 100) * 100, 8);
+    expect(r.netMarginPct).toBeCloseTo(((60 - r.fee) / 100) * 100, 8);
+  });
+
   it('fmtDuration', () => {
     expect(fmtDuration(30 * 60_000)).toBe('30 мин');
     expect(fmtDuration(90 * 60_000)).toBe('1 ч 30 мин');
@@ -526,5 +608,82 @@ describe('вспомогательные функции', () => {
   it('uid уникален и непустой', () => {
     expect(uid()).not.toBe(uid());
     expect(uid().length).toBeGreaterThan(0);
+  });
+});
+
+describe('entryBlockReason / makePaperPosition (быстрый вход из таблиц)', () => {
+  const plan = (over: Partial<TradePlan> = {}): TradePlan => ({
+    direction: 'long',
+    confidence: 85,
+    regime: '',
+    horizon: '',
+    price: 100,
+    atr: 1,
+    ema20: 101,
+    ema50: 100.5,
+    recentHigh: 105,
+    recentLow: 95,
+    entryLow: 99.5,
+    entryHigh: 100.5,
+    entryMid: 100,
+    stop: 91,
+    tp1: 110,
+    tp2: 120,
+    tp3: 130,
+    riskDist: 9,
+    rrTp1: 1,
+    rrTp2: 2,
+    rrTp3: 3,
+    summary: '',
+    setup: '',
+    risks: [],
+    invalidation: [],
+    checklist: [],
+    ...over,
+  });
+  const draft = { symbol: 'AAAUSDT', category: 'linear' as const, interval: '5' as const, direction: 'long' as const };
+  const opts = { deposit: 1000, riskPct: 1, stake: 250, leverage: 3 };
+
+  it('makePaperPosition: размер из риска (riskMoney/riskDist), поля из плана', () => {
+    const p = makePaperPosition('AAAUSDT', 'linear', '5', plan(), opts);
+    expect(p.qty).toBeCloseTo(10 / 9, 8);
+    expect(p.entryPrice).toBe(100);
+    expect(p.riskMoney).toBe(10);
+    expect(p.stop).toBe(91);
+    expect(p.direction).toBe('long');
+    expect(p.status).toBe('open');
+  });
+
+  it('entryBlockReason: разрешён → null', () => {
+    expect(entryBlockReason([], draft, plan(), opts)).toBeNull();
+  });
+
+  it('entryBlockReason: без направленного сетапа → причина', () => {
+    const w = plan({ direction: 'wait' });
+    expect(entryBlockReason([], draft, w, opts)).toMatch(/нет направленного/i);
+  });
+
+  it('entryBlockReason: маржа больше ставки → блок', () => {
+    const big = { ...opts, riskPct: 40, stake: 100 }; // риск 400, qty 44.4, маржа 1481 > 100
+    expect(entryBlockReason([], draft, plan(), big)).toMatch(/маржи/i);
+  });
+
+  it('entryBlockReason: ликвидация ближе стопа при большом плече → блок', () => {
+    // стоп 91 от entry 100: при ×20 liq 95.48 — ближе стопа
+    expect(entryBlockReason([], draft, plan(), { ...opts, leverage: 20 })).toMatch(/ликвидаци/i);
+    // при ×3 безопасно
+    expect(entryBlockReason([], draft, plan(), opts)).toBeNull();
+  });
+
+  it('entryBlockReason: дубль блокирует', () => {
+    expect(entryBlockReason([pos({ symbol: 'AAAUSDT' })], draft, plan(), opts)).toMatch(/дубль/i);
+  });
+
+  it('портфельный лимит: суммарная маржа открытых ≤ депозита', () => {
+    const fill = Array.from({ length: 5 }, (_, i) => pos({ id: `f${i}`, symbol: `F${i}USDT` })); // маржа 5×100 = 500
+    const fiveHundred = { deposit: 500, riskPct: 1, stake: 1000, leverage: 3 };
+    expect(entryBlockReason(fill, draft, plan(), fiveHundred)).toMatch(/капитал/i);
+    // пустой портфель — разрешено
+    expect(entryBlockReason([], draft, plan(), fiveHundred)).toBeNull();
   });
 });

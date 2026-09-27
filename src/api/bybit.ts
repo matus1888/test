@@ -43,6 +43,27 @@ export function bybitTradeUrl(category: Category, symbol: string): string | null
 const DIRECT = 'https://api.bybit.com';
 const PROXY = '/bybit'; // vite server.proxy, работает в dev
 
+// Скринер грузит kline до 200 символов разом (useQueries → параллельные fetch).
+// API Bybit при массовых одновременных запросах отвечает 429, поэтому HTTP-конкуренцию
+// kline-запросов ограничиваем простой FIFO-очередью.
+const KLINE_MAX_CONCURRENT = 10;
+let klineActive = 0;
+const klineWaiters: (() => void)[] = [];
+
+async function withKlineGate<T>(fn: () => Promise<T>): Promise<T> {
+  if (klineActive >= KLINE_MAX_CONCURRENT) {
+    await new Promise<void>((resolve) => klineWaiters.push(resolve));
+  }
+  klineActive += 1;
+  try {
+    return await fn();
+  } finally {
+    klineActive -= 1;
+    const next = klineWaiters.shift();
+    if (next) next();
+  }
+}
+
 export interface Ticker {
   symbol: string;
   lastPrice: number;
@@ -80,7 +101,9 @@ async function getJSON<T>(path: string): Promise<T> {
     if (j.retCode !== 0) throw new Error(j.retMsg || `retCode ${j.retCode}`);
     return j.result;
   } catch (e) {
-    if (typeof window === 'undefined') throw e;
+    // Прокси-фолбек существует только в dev (vite server.proxy). В проде его нет —
+    // лучше отдать честную ошибку, чем гонять лишний запрос в 404.
+    if (typeof window === 'undefined' || !import.meta.env.DEV) throw e;
     const r = await fetch(`${PROXY}${path}`);
     if (!r.ok) throw new Error(`HTTP ${r.status} (proxy)`);
     const j = (await r.json()) as BybitResp<T>;
@@ -119,20 +142,22 @@ export async function fetchKlines(
   limit = 200,
 ): Promise<Candle[]> {
   const n = Math.min(Math.max(limit, 10), 1000);
-  const result = await getJSON<{ list: string[][] }>(
-    `/v5/market/kline?category=${category}&symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${n}`,
-  );
-  const rows = result.list
-    .map((r) => ({
-      time: Number(r[0]),
-      open: num(r[1]),
-      high: num(r[2]),
-      low: num(r[3]),
-      close: num(r[4]),
-      volume: num(r[5]),
-      turnover: num(r[6]),
-    }))
-    .filter((c) => Number.isFinite(c.time) && c.close > 0)
-    .sort((a, b) => a.time - b.time);
-  return rows;
+  return withKlineGate(async () => {
+    const result = await getJSON<{ list: string[][] }>(
+      `/v5/market/kline?category=${category}&symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${n}`,
+    );
+    const rows = result.list
+      .map((r) => ({
+        time: Number(r[0]),
+        open: num(r[1]),
+        high: num(r[2]),
+        low: num(r[3]),
+        close: num(r[4]),
+        volume: num(r[5]),
+        turnover: num(r[6]),
+      }))
+      .filter((c) => Number.isFinite(c.time) && c.close > 0)
+      .sort((a, b) => a.time - b.time);
+    return rows;
+  });
 }

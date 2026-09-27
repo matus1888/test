@@ -1,7 +1,8 @@
 import type { Candle, Category, Interval } from '../api/bybit';
+import type { TradePlan } from './tradePlan';
 
 export type PaperDirection = 'long' | 'short';
-export type CloseReason = 'stop' | 'breakeven' | 'tp1' | 'tp2' | 'tp3' | 'manual';
+export type CloseReason = 'stop' | 'breakeven' | 'tp1' | 'tp2' | 'tp3' | 'manual' | 'liq';
 
 export interface PaperLeg {
   reason: 'tp1' | 'tp2';
@@ -20,7 +21,7 @@ export const TP_FRACS = { tp1: 0.7, tp2: 0.2 } as const;
 export const RUNNER_FRAC = 1 - TP_FRACS.tp1 - TP_FRACS.tp2;
 
 export interface PaperEvent {
-  type: 'tp1' | 'tp2' | 'tp3' | 'stop' | 'breakeven';
+  type: 'tp1' | 'tp2' | 'tp3' | 'stop' | 'breakeven' | 'liq';
   price: number;
   time: number;
 }
@@ -56,6 +57,8 @@ export interface PaperPosition {
 export interface PaperEval {
   events: PaperEvent[];
   stopHit: boolean;
+  /** Цена коснулась ликвидации (леверидж/маржа не удержали позицию). */
+  liqHit: boolean;
   maxTp: 0 | 1 | 2 | 3;
   /** Максимальный ход в пользу позиции, в единицах риска. */
   mfeR: number;
@@ -74,9 +77,13 @@ export function evaluatePosition(pos: PaperPosition, candles: Candle[]): PaperEv
   const rows = candles.filter((c) => c.time >= pos.openedAt && c.time <= end);
   const risk = Math.abs(pos.entryPrice - pos.stop) || 1e-9;
   const side = sideOf(pos.direction);
+  // Ликвидация изолированной маржи по текущему левериджу. Проверяется раньше стопа:
+  // если свеча-гэп пробила и стоп, и ликвидацию, в реале первым сработает margin call.
+  const liqP = liquidationPrice(pos);
   const events: PaperEvent[] = [];
   const seen = { tp1: false, tp2: false, tp3: false };
   let stopHit = false;
+  let liqHit = false;
   let beActive = false;
   let mfe = 0;
   let mae = 0;
@@ -93,6 +100,11 @@ export function evaluatePosition(pos: PaperPosition, candles: Candle[]): PaperEv
         break;
       }
     } else {
+      if (liqP != null && (side === 1 ? c.low <= liqP : c.high >= liqP)) {
+        events.push({ type: 'liq', price: liqP, time: c.time });
+        liqHit = true;
+        break;
+      }
       const stopTouched = side === 1 ? c.low <= pos.stop : c.high >= pos.stop;
       if (stopTouched) {
         events.push({ type: 'stop', price: pos.stop, time: c.time });
@@ -113,6 +125,7 @@ export function evaluatePosition(pos: PaperPosition, candles: Candle[]): PaperEv
   return {
     events,
     stopHit,
+    liqHit,
     maxTp: seen.tp3 ? 3 : seen.tp2 ? 2 : seen.tp1 ? 1 : 0,
     mfeR: mfe,
     maeR: mae,
@@ -167,14 +180,19 @@ export function totalPnlOf(pos: PaperPosition, price: number): TotalPnl {
   const gross = booked + mtm;
   const fee = feeOf(pos);
   const net = gross - fee;
+  const { notional, margin } = positionMetrics(pos);
   return {
     pnl: gross,
     pct: pos.stake > 0 ? (gross / pos.stake) * 100 : 0,
+    pctMargin: margin > 0 ? (gross / margin) * 100 : 0,
     r: gross / riskMoney,
     fee,
     net,
     netPct: pos.stake > 0 ? (net / pos.stake) * 100 : 0,
+    netMarginPct: margin > 0 ? (net / margin) * 100 : 0,
     netR: net / riskMoney,
+    notional,
+    margin,
     booked,
     remaining,
   };
@@ -186,6 +204,10 @@ export function settleOpen(pos: PaperPosition, candles: Candle[] | undefined): S
   const ev = evaluatePosition(pos, candles);
   const have = new Set((pos.legs ?? []).map((l) => l.reason));
   const legs = legsOf(ev).filter((l) => !have.has(l.reason));
+  if (ev.liqHit) {
+    const e = ev.events.find((x) => x.type === 'liq');
+    return { closeReason: 'liq', closePrice: e ? e.price : pos.entryPrice, closedAt: e ? e.time : Date.now(), legs };
+  }
   if (ev.stopHit) {
     const e = ev.events.find((x) => x.type === 'stop');
     return { closeReason: 'stop', closePrice: pos.stop, closedAt: e ? e.time : Date.now(), legs };
@@ -234,8 +256,10 @@ export function applySettle(
 
 export interface Pnl {
   pnl: number;
-  /** % к ставке. */
+  /** % к ставке (выделенному бюджету). */
   pct: number;
+  /** % к марже (номинал/плечо) — реальная доходность с учётом плеча. */
+  pctMargin: number;
   /** R-мультипл: прибыль в единицах риска. */
   r: number;
   /** Оценка комиссии за круг (вход + выход), $. */
@@ -244,8 +268,14 @@ export interface Pnl {
   net: number;
   /** Чистый % к ставке. */
   netPct: number;
+  /** Чистый % к марже. */
+  netMarginPct: number;
   /** Чистый R-мультипл. */
   netR: number;
+  /** Номинал позиции, $. */
+  notional: number;
+  /** Занятая изолированная маржа = номинал / плечо, $. */
+  margin: number;
 }
 
 /**
@@ -268,6 +298,15 @@ export function feeOf(pos: PaperPosition): number {
   return Number.isFinite(fee) && fee > 0 ? fee : 0;
 }
 
+/** Номинал и изолированная маржа позиции: маржа = номинал / плечо.
+ *  НОМИНАЛ/ПЛЕЧО И СТАВКА НЕ МЕНЯЮТ ДОЛЛАРОВЫЙ P&L: он всегда (exit−entry)×qty.
+ *  Плечо меняет занятую маржу и «реальный» процент дохода, ставка — лишь бюджет-гейт. */
+export function positionMetrics(pos: Pick<PaperPosition, 'qty' | 'entryPrice' | 'leverage'>): { notional: number; margin: number } {
+  const notional = Math.abs(pos.qty * pos.entryPrice);
+  const margin = pos.leverage > 0 ? notional / pos.leverage : notional;
+  return { notional, margin };
+}
+
 /**
  * Ориентировочная цена ликвидации для изолированной маржи.
  * Маржа на единицу = entry/leverage; ликвидация, когда убыток съедает маржу
@@ -287,20 +326,71 @@ export function liquidationPrice(pos: Pick<PaperPosition, 'direction' | 'entryPr
   return Number.isFinite(liq) && liq >= 0 ? liq : null;
 }
 
+/** Допустимая доля пути до ликвидации, которую занимает стоп (см. maxSafeLeverage/liqToStopRatio). */
+export const LIQ_SAFETY = 0.7;
+
+/**
+ * Насколько ликвидация дальше стопа: во сколько раз расстояние до ликвидации больше
+ * расстояния до стопа. 1 — уровни совпадают; <1 — margin call случится раньше стопа.
+ */
+export function liqToStopRatio(
+  entryPrice: number,
+  stop: number,
+  direction: PaperDirection,
+  leverage: number,
+  mmr = 0.005,
+): number | null {
+  if (!Number.isFinite(leverage) || leverage <= 0) return null;
+  const liq = liquidationPrice({ direction, entryPrice, leverage }, mmr);
+  const stopDist = Math.abs(entryPrice - stop);
+  const liqDist = liq == null ? null : Math.abs(entryPrice - liq);
+  if (liqDist == null || !(stopDist > Number.EPSILON)) return null;
+  return liqDist / stopDist;
+}
+
+/**
+ * Максимальное плечо, при котором стоп занимает не более `safety` доли пути до ликвидации
+ * (т.е. ликвидация остаётся за стопом с запасом). null — проверить нельзя (нет стопа/цены).
+ */
+export function maxSafeLeverage(
+  entryPrice: number,
+  stop: number,
+  direction: PaperDirection,
+  safety = LIQ_SAFETY,
+  mmr = 0.005,
+): number | null {
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(stop) || stop <= 0) return null;
+  const fs = direction === 'long' ? (entryPrice - stop) / entryPrice : (stop - entryPrice) / entryPrice;
+  if (!Number.isFinite(fs) || fs <= 0 || !(safety > 0)) return null;
+  if (direction === 'long') {
+    // (1-1/L)/(1-mmr) <= 1 - fs/safety  =>  L <= 1/(1-(1-mmr)*(1-fs/safety))
+    const denom = 1 - (1 - mmr) * (1 - fs / safety);
+    return denom > 0 ? 1 / denom : null;
+  }
+  // (1/L - mmr)/(1+mmr) >= fs/safety  =>  L <= 1/((1+mmr)*fs/safety + mmr)
+  const denom = (1 + mmr) * (fs / safety) + mmr;
+  return denom > 0 ? 1 / denom : null;
+}
+
 /** P&L при цене выхода (грязными + чистыми с учётом комиссии). */
 export function pnlOf(pos: PaperPosition, exitPrice: number): Pnl {
   const riskMoney = Math.abs(pos.entryPrice - pos.stop) * pos.qty || 1e-9;
   const pnl = (exitPrice - pos.entryPrice) * sideOf(pos.direction) * pos.qty;
   const fee = feeOf(pos);
   const net = pnl - fee;
+  const { notional, margin } = positionMetrics(pos);
   return {
     pnl,
     pct: pos.stake > 0 ? (pnl / pos.stake) * 100 : 0,
+    pctMargin: margin > 0 ? (pnl / margin) * 100 : 0,
     r: pnl / riskMoney,
     fee,
     net,
     netPct: pos.stake > 0 ? (net / pos.stake) * 100 : 0,
+    netMarginPct: margin > 0 ? (net / margin) * 100 : 0,
     netR: net / riskMoney,
+    notional,
+    margin,
   };
 }
 
@@ -312,6 +402,7 @@ export function closeLabel(reason: CloseReason | undefined): string {
     case 'tp2': return 'TP2';
     case 'tp3': return 'TP3';
     case 'manual': return 'Вручную';
+    case 'liq': return 'Ликвидация';
     default: return '—';
   }
 }
@@ -324,6 +415,7 @@ export function eventLabel(type: PaperEvent['type']): string {
     case 'tp3': return 'TP3';
     case 'stop': return 'Стоп';
     case 'breakeven': return 'Б/У';
+    case 'liq': return 'LIQ';
   }
 }
 
@@ -335,13 +427,105 @@ export interface DraftKey {
 }
 
 export interface PortfolioLimits {
-  /** Максимум открытых позиций одновременно. */
+  /** Максимум открытых позиций одновременно. Тестовый режим: без ограничения (Infinity). */
   maxOpen: number;
   /** Дневной лимит чистого убытка закрытых позиций, $. */
   maxDailyLoss: number;
 }
 
-export const DEFAULT_LIMITS: PortfolioLimits = { maxOpen: 5, maxDailyLoss: 150 };
+export const DEFAULT_LIMITS: PortfolioLimits = { maxOpen: Infinity, maxDailyLoss: 150 };
+
+/** Параметры риска для входа (общие для страницы символа и быстрого входа из таблиц). */
+export interface EntryOpts {
+  deposit: number;
+  riskPct: number;
+  stake: number;
+  leverage: number;
+}
+
+/** Суммарная занятая маржа открытых позиций (задействованный капитал). */
+export function totalEngagedMargin(positions: PaperPosition[]): number {
+  return positions.reduce(
+    (a, p) => (p.status === 'open' ? a + positionMetrics(p).margin : a),
+    0,
+  );
+}
+
+/**
+ * Единая проверка перед входом: риск, маржа, безопасность ликвидации, дубли/лимиты,
+ * а также портфельный лимит — суммарная маржа открытых позиций не может превышать
+ * размер депозита (портфеля). Возвращает причину блокировки или null, если вход разрешён.
+ * Используется страницей символа и кнопками быстрого входа в таблицах — один источник правды.
+ */
+export function entryBlockReason(
+  positions: PaperPosition[],
+  draft: DraftKey,
+  plan: TradePlan,
+  opts: EntryOpts,
+): string | null {
+  if (plan.direction !== 'long' && plan.direction !== 'short') return 'Нет направленного сетапа';
+  const riskMoney = opts.deposit * (opts.riskPct / 100);
+  if (!(riskMoney > 0)) return 'Укажи риск больше нуля';
+  const entryPrice = plan.entryMid;
+  const riskDist = plan.riskDist;
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(riskDist) || riskDist <= 0) return 'Нет зоны входа';
+  const qty = riskMoney / riskDist;
+  const marginNeeded = (qty * entryPrice) / opts.leverage;
+  if (marginNeeded > opts.stake) {
+    return `Не хватает маржи: нужно ${marginNeeded.toFixed(2)} $ при ×${opts.leverage} — подними ставку или снизь риск`;
+  }
+  const ratio = liqToStopRatio(entryPrice, plan.stop, plan.direction, opts.leverage);
+  if (ratio != null && ratio < 1 / LIQ_SAFETY) {
+    const maxLev = maxSafeLeverage(entryPrice, plan.stop, plan.direction);
+    return `Ликвидация ближе стопа: liq при ×${opts.leverage} раньше стопа. Максимально безопасное плечо ~×${maxLev == null ? '—' : Math.max(1, Math.floor(maxLev))}`;
+  }
+  // Портфельный лимит: задействованный капитал (сумма марж) не превышает депозит.
+  if (opts.deposit > 0) {
+    const engaged = totalEngagedMargin(positions);
+    if (engaged + marginNeeded > opts.deposit) {
+      const free = Math.max(0, opts.deposit - engaged);
+      return `Задействованный капитал исчерпан: нужно ещё ${marginNeeded.toFixed(0)} $, свободно ${free.toFixed(0)} $ из ${opts.deposit.toFixed(0)} $`;
+    }
+  }
+  return canOpenPosition(positions, draft);
+}
+
+/**
+ * Собрать бумажную позицию из плана и параметров риска.
+ * Вызывать только после entryBlockReason(...) === null.
+ */
+export function makePaperPosition(
+  symbol: string,
+  category: Category,
+  interval: Interval,
+  plan: TradePlan,
+  opts: EntryOpts,
+): PaperPosition {
+  const riskMoney = opts.deposit * (opts.riskPct / 100);
+  const entryPrice = plan.entryMid;
+  const qty = riskMoney / plan.riskDist;
+  return {
+    id: uid(),
+    symbol,
+    category,
+    interval,
+    direction: plan.direction === 'short' ? 'short' : 'long',
+    entryPrice,
+    stake: opts.stake,
+    leverage: opts.leverage,
+    qty,
+    stop: plan.stop,
+    tp1: plan.tp1,
+    tp2: plan.tp2,
+    tp3: plan.tp3,
+    entryLow: plan.entryLow,
+    entryHigh: plan.entryHigh,
+    confidence: plan.confidence,
+    riskMoney,
+    openedAt: Date.now(),
+    status: 'open',
+  };
+}
 
 /**
  * Проверка перед открытием: дубли, лимит открытых позиций, дневной лимит убытка.

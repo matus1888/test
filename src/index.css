@@ -37,6 +37,46 @@ select, .search {
 .search { min-width: 160px; }
 .state { color: var(--muted); font-size: 13px; margin: 0; }
 .state.err { color: var(--neg); }
+.state.pos { color: var(--pos); }
+.state.neg { color: var(--neg); }
+.state.err-note { color: #e2c08d; font-size: 12px; margin-top: 8px; }
+.api-link {
+  color: var(--muted); text-decoration: none; font-size: 13px; margin-left: auto;
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
+}
+.api-link:hover { border-color: var(--accent); color: var(--text); }
+.wt-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.68); z-index: 5000;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+}
+.wt-panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+  max-width: 600px; width: 100%; padding: 22px; box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+}
+.wt-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.wt-head h3 { margin: 0; }
+.wt-body b { font-size: 16px; }
+.wt-text { color: var(--muted); font-size: 14px; line-height: 1.55; margin: 8px 0 14px; min-height: 112px; }
+.wt-link { display: inline-block; text-decoration: none; }
+.wt-nav { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 14px; }
+.wt-actions { display: flex; gap: 8px; }
+.wt-dots { display: flex; gap: 6px; }
+.wt-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+.wt-dot.active { background: var(--accent); }
+.sec-title { margin: 0 0 10px; }
+.dash-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+.dash-card { text-decoration: none; display: flex; flex-direction: column; gap: 6px; }
+.dash-card b { color: var(--text); font-size: 16px; }
+.apiform label { flex-wrap: wrap; }
+.apiform input, .apiform select { flex: 1; min-width: 0; }
+.bot-steps li { margin: 4px 0; font-size: 14px; }
+.bot-pre {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px; font-size: 12px; overflow: auto; color: var(--muted); margin: 10px 0;
+}
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.form-grid label { flex-wrap: wrap; }
+.form-grid input { flex: 1; min-width: 0; }
 .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
 table { border-collapse: collapse; width: 100%; font-size: 13px; min-width: 1100px; }
 th, td { padding: 8px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid #1a1e25; }
