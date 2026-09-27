@@ -23,6 +23,8 @@ import QuickTrade from '../components/QuickTrade';
 import { ExternalIcon } from '../components/icons';
 import { useSessionState } from '../hooks/useSessionState';
 import { usePaperPositions } from '../hooks/usePaper';
+import { useTradingMode } from '../hooks/useTradingMode';
+import { liveHref } from '../lib/tradeMode';
 import {
   entryBlockReason,
   liquidationPrice,
@@ -43,12 +45,15 @@ export default function SymbolPage() {
   const [lev, setLev] = useSessionState<number>('paper:leverage', 3, isPositiveNumber);
   const navigate = useNavigate();
   const { add, positions } = usePaperPositions();
+  // Реальный режим: вход ведёт на форму ордера /live, риск и плечо — те же ключи сессии.
+  const [mode] = useTradingMode();
 
   const category: Category = isCategory(catParam) ? catParam : 'linear';
   const symbol = symParam ? decodeURIComponent(symParam) : '';
   const urlInterval = searchParams.get('interval');
   // Приоритет: ?interval= в адресе, иначе сохранённый выбор
   const interval: Interval = urlInterval && isInterval(urlInterval) ? urlInterval : storedInterval;
+  const realHref = mode === 'real' ? liveHref(symbol, interval) : undefined;
 
   const setInterval = (v: Interval) => {
     setStoredInterval(v);
@@ -236,6 +241,7 @@ export default function SymbolPage() {
               liq={liq}
               liqRatio={liqRatio}
               onOpen={openPaper}
+              realHref={realHref}
             />
           )}
 

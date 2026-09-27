@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import { useApiAccount } from '../hooks/useApiAccount';
 import RealAccountView from '../components/RealAccountView';
+import EnvBadge from '../components/EnvBadge';
 
 /** Портфель реального счёта: капитал, маржа, позиции и активные ордера из API Bybit. */
 export default function RealPortfolioPage() {
@@ -11,10 +12,11 @@ export default function RealPortfolioPage() {
       <Link to="/" className="back">← Назад к скринеру</Link>
       <header className="top">
         <div>
-          <h1>Портфель Bybit</h1>
+          <h1>Портфель Bybit <EnvBadge kind="real" label="РЕАЛЬНЫЙ СЧЁТ" title="Капитал, маржа, позиции и ордера биржи по API" /></h1>
           <p className="sub">
             Реальный счёт по API: капитал, занятая маржа, позиции и висящие ордера
-            {api.testnet ? ' · тестнет' : ' · мейннет'}
+            {api.testnet ? ' · тестнет' : ' · мейннет'}.
+            {' '}Виртуальный портфель — <Link to="/paper">/paper</Link>, реальные ордера — <Link to="/live">/live</Link>.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   INTERVALS,
@@ -16,21 +16,31 @@ import {
   loadCredentials,
   type ApiCredentials,
 } from '../api/privateApi';
-import { closeReal, fetchLivePositions, moveStopToBreakeven, openReal } from '../api/live';
+import { closeReal, fetchLivePositions, getInstrument, moveStopToBreakeven, openReal, planLadder } from '../api/live';
 import { computeMetrics } from '../lib/metrics';
 import { buildTradePlan, type TradePlan } from '../lib/tradePlan';
 import { useSessionState } from '../hooks/useSessionState';
+import { parseLiveLink } from '../lib/tradeMode';
 import { fmt, fmtCompact } from '../lib/format';
 import { setupCls, setupText } from '../lib/ui';
 import Term from '../components/Term';
+import EnvBadge from '../components/EnvBadge';
 
 const isPositiveNumber = (v: unknown): v is number => typeof v === 'number' && v > 0;
 
 /** Реальная торговля через API Bybit (сеть — та, что в сохранённых ключах). */
 export default function LivePage() {
   const [cred] = useState<ApiCredentials | null>(() => loadCredentials());
-  const [symbol, setSymbol] = useState('');
-  const [interval, setLiveInterval] = useSessionState<Interval>('live:interval', '5', (v: unknown): v is Interval => typeof v === 'string' && (INTERVALS as string[]).includes(v));
+  // Предзаполнение из ссылки «Реальный вход →» в скринере/плане: /live?symbol=…&interval=…
+  const [link] = useSearchParams();
+  const fromLink = useMemo(() => parseLiveLink(`?${link.toString()}`), [link]);
+  const [symbol, setSymbol] = useState(fromLink.symbol);
+  const isTf = (v: unknown): v is Interval => typeof v === 'string' && (INTERVALS as string[]).includes(v);
+  const [interval, setLiveInterval] = useSessionState<Interval>(
+    'live:interval',
+    isTf(fromLink.interval) ? fromLink.interval : '5',
+    isTf,
+  );
   const [deposit] = useSessionState<number>('symbol:deposit', 1000, isPositiveNumber);
   const [riskPct] = useSessionState<number>('symbol:riskPct', 1, isPositiveNumber);
   const [lev] = useSessionState<number>('paper:leverage', 3, isPositiveNumber);
@@ -74,6 +84,15 @@ export default function LivePage() {
   const plan: TradePlan | null = planQ.data ?? null;
   const planLoading = planQ.isFetching;
   const canTrade = testnet || confirmed;
+
+  // Ограничения биржи по символу (шаг количества, минимальный номинал) — один раз на символ.
+  const instQ = useQuery({
+    queryKey: ['live', 'inst', sym, cred?.testnet ?? false],
+    queryFn: () => getInstrument(cred as ApiCredentials, 'linear', sym),
+    enabled: !!cred && sym.length > 0,
+    staleTime: 900_000,
+    retry: false,
+  });
 
   const reload = () => {
     void balanceQ.refetch();
@@ -147,6 +166,12 @@ export default function LivePage() {
   const riskMoney = deposit * (riskPct / 100);
   const previewQty = plan && plan.riskDist > 0 ? riskMoney / plan.riskDist : 0;
   const previewMargin = plan ? (previewQty * plan.entryMid) / lev : 0;
+  // Пред-полётная проверка лесенки: показывает минимальный размер до отправки ордеров.
+  const ladder = plan && instQ.data ? planLadder(instQ.data, plan.entryMid, riskMoney, plan.riskDist) : null;
+  const ladderProblems = ladder?.problems ?? [];
+  const minDepositPct = ladder && deposit > 0 && ladder.minRisk > 0
+    ? (ladder.minRisk / deposit) * 100
+    : null;
   const positions = positionsQ.data ?? [];
   const orders = ordersQ.data ?? [];
   const unreal = positions.reduce((a, p) => a + p.unrealisedPnl, 0);
@@ -157,7 +182,11 @@ export default function LivePage() {
 
       <header className="top">
         <div>
-          <h1>Реальная торговля</h1>
+          <h1>Реальная торговля <EnvBadge kind="real" label="РЕАЛЬНЫЕ ДЕНЬГИ" title="Здесь отправляются настоящие ордера — единственное место в приложении, где это происходит" /></h1>
+          <p className="sub">
+            Единственная страница, где уходят реальные ордера: план по символу → лимитный вход со стопом → лесенка TP1/TP2/TP3.
+            {' '}Виртуальные входы — в скринере и на странице символа в режиме «Бумага», портфель — <Link to="/paper">/paper</Link>.
+          </p>
           <p className="sub">
             Сеть: <b className={testnet ? '' : 'neg'}>{testnet ? 'ТЕСТНЕТ' : 'МЕЙННЕТ'}</b> · equity{' '}
             {balanceQ.data ? `${fmtCompact(balanceQ.data.totalEquity)} $` : '…'} · свободно{' '}
@@ -179,7 +208,7 @@ export default function LivePage() {
 
       <section className="cards">
         <div className="card">
-          <h3>Открыть из плана</h3>
+          <h3>Открыть реальный ордер из плана</h3>
           <label>Символ
             <input name="liveSymbol" value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="BTCUSDT" />
           </label>
@@ -199,8 +228,23 @@ export default function LivePage() {
               <div className="lvl"><span>Стоп</span><b>{fmt(plan.stop, 4)}</b></div>
               <div className="lvl"><span>TP1/TP2/TP3</span><b>{fmt(plan.tp1, 4)} / {fmt(plan.tp2, 4)} / {fmt(plan.tp3, 4)}</b></div>
               <div className="lvl"><span>Размер (риск {fmt(riskMoney)} $)</span><b>≈{fmt(previewQty, 4)} · маржа ≈{fmt(previewMargin, 1)} $</b></div>
+              {ladder && ladderProblems.length === 0 && (
+                <div className="lvl">
+                  <span>Минимум для лесенки</span>
+                  <b>{fmt(ladder.minNotional, 0)} $ · риск от {fmt(ladder.minRisk, 2)} $
+                    {minDepositPct != null && minDepositPct > riskPct ? ` (${fmt(minDepositPct, 1)} % депозита)` : ''}</b>
+                </div>
+              )}
+              {ladderProblems.length > 0 && (
+                <p className="state err">
+                  Биржа не примет такой размер: {ladderProblems.join(' ')} Нужна позиция от {fmt(ladder?.minNotional ?? 0, 0)} $
+                  {' '}— риск не меньше {fmt(ladder?.minRisk ?? 0, 2)} $ (это {fmt(minDepositPct ?? 0, 1)} % депозита).
+                  {' '}Уменьши риск % или возьми символ с мелким шагом количества.
+                </p>
+              )}
+              {instQ.isError && <p className="state err">Не удалось получить ограничения биржи по символу: {String(instQ.error)}</p>}
               <div className="controls">
-                <button className="btn open-long" onClick={doOpen} disabled={busy || !canTrade}>
+                <button className={`btn ${testnet ? 'open-long' : 'btn-danger'}`} onClick={doOpen} disabled={busy || !canTrade || ladderProblems.length > 0}>
                   {busy ? 'Открываем…' : `Открыть ордер (${testnet ? 'тестнет' : 'реально'})`}
                 </button>
               </div>

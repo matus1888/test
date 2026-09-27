@@ -9,6 +9,7 @@ import LivePage from './pages/LivePage';
 import AccountPage from './pages/AccountPage';
 import RealPortfolioPage from './pages/RealPortfolioPage';
 import PaperHeader from './components/PaperHeader';
+import TradeModeBar from './components/TradeModeBar';
 import Walkthrough from './components/Walkthrough';
 import { shouldAutoOpen } from './lib/guide';
 
@@ -29,6 +30,7 @@ export default function App() {
   return (
     <HashRouter>
       <PaperHeader />
+      <TradeModeBar />
       <Routes>
         <Route path="/" element={<ScreenerPage />} />
         <Route path="/s/:category/:symbol" element={<SymbolPage />} />

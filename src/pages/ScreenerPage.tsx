@@ -12,8 +12,10 @@ import {
 import { useKlines, useTickers } from '../hooks/useMarket';
 import { usePaperPositions } from '../hooks/usePaper';
 import { useSessionState } from '../hooks/useSessionState';
+import { useTradingMode } from '../hooks/useTradingMode';
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
 import { entryBlockReason, makePaperPosition } from '../lib/paper';
+import { liveHref } from '../lib/tradeMode';
 import { numCls, rowKeyProps, setupCls, setupText } from '../lib/ui';
 import { CAT_GLOSS, CONF_OPTIONS, REFRESH_OPTIONS } from '../lib/options';
 import {
@@ -42,6 +44,8 @@ const isPositiveNumber = (v: unknown): v is number => typeof v === 'number' && v
 export default function ScreenerPage() {
   const navigate = useNavigate();
   const { positions, add } = usePaperPositions();
+  const [mode] = useTradingMode();
+  const real = mode === 'real';
   const [entryMsg, setEntryMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [category, setCategory] = useSessionState<Category>('screener:category', 'linear', isCategory);
   const [interval, setInterval] = useSessionState<Interval>('screener:interval', '5', isInterval);
@@ -105,7 +109,21 @@ export default function ScreenerPage() {
       setEntryMsg({ text: `${r.symbol}: вход заблокирован — дубль или лимит`, ok: false });
       return;
     }
-    setEntryMsg({ text: `${r.symbol}: вход открыт · риск ${fmt(pos.riskMoney)}$ ×${pos.leverage}`, ok: true });
+    setEntryMsg({ text: `${r.symbol}: бумажный вход открыт · риск ${fmt(pos.riskMoney)}$ ×${pos.leverage}`, ok: true });
+  };
+
+  /**
+   * Кнопка входа в строке. В бумажном режиме открывает виртуальную позицию,
+   * в реальном — ведёт на форму реального ордера (/live), где нужен явный
+   * подтверждающий клик: из таблицы деньги не тратятся.
+   */
+  const entryAction = (r: Row) => {
+    if (!r.plan) return;
+    if (real) {
+      navigate(liveHref(r.symbol, interval));
+      return;
+    }
+    quickEntry(r);
   };
 
   const klineLoading = klines.some((k) => k.loading);
@@ -159,7 +177,9 @@ export default function ScreenerPage() {
       {tickers.isError && <p className="state err">Ошибка загрузки: {String(tickers.error instanceof Error ? tickers.error.message : tickers.error)}</p>}
       {!tickers.isPending && (
         <p className="state">
-          Монет: {tickers.data?.length ?? 0} · В анализе: {symbols.length} · Сетапов: {setupCount} · Свечи {INTERVAL_LABELS[interval]} ×200
+          Режим: <b className={real ? 'neg' : ''}>{real ? 'реальный' : 'бумажный'}</b>
+          {' · '}{real ? 'вход ведёт на форму ордера /live' : 'вход виртуальный, деньги не двигаются'}
+          {' · '}Монет: {tickers.data?.length ?? 0} · В анализе: {symbols.length} · Сетапов: {setupCount} · Свечи {INTERVAL_LABELS[interval]} ×200
           {minConf > 0 ? ` · Фильтр: уверенность от ${minConf}%` : ''}
           {` · Автообновление: ${refreshSec === 0 ? 'выкл' : `каждые ${refreshLabel}`}`}
           {tickers.dataUpdatedAt > 0 ? ` · Обновлено: ${new Date(tickers.dataUpdatedAt).toLocaleTimeString()}` : ''}
@@ -193,10 +213,12 @@ export default function ScreenerPage() {
                   {r.plan && r.plan.direction !== 'wait' && (
                     <button
                       type="button"
-                      className="btn btn-sm quick-entry"
-                      onClick={(e) => { e.stopPropagation(); quickEntry(r); }}
-                      title="Быстрый вход: размер от риска, вход по середине зоны, текущие ставка/плечо"
-                    >Вход</button>
+                      className={`btn btn-sm quick-entry${real ? ' real' : ''}`}
+                      onClick={(e) => { e.stopPropagation(); entryAction(r); }}
+                      title={real
+                        ? 'Реальный режим: откроет форму ордера на /live (риск и плечо перенесутся). Ордер уходит только после подтверждения'
+                        : 'Бумажный вход: размер от риска, вход по середине зоны, текущие ставка/плечо. Реальные деньги не двигаются'}
+                    >{real ? 'Реальный вход →' : 'Вход (бумага)'}</button>
                   )}
                 </td>
                 <td>{r.confidence == null ? '—' : `${r.confidence}%`}</td>

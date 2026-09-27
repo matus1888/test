@@ -83,7 +83,7 @@ export default function AccountPage() {
             <input type="checkbox" checked={learning} onChange={(e) => toggleLearning(e.target.checked)} />
             Показывать обзор при запуске
           </label>
-          <p className="state">Проходит по основным страницам: скринер, планы и бумажный портфель.</p>
+          <p className="state">Проходит по основным страницам: скринер, режим бумага/реально, планы, бумажный портфель, подключение API и реальная торговля.</p>
           <div className="controls">
             <button className="btn open-long" onClick={runNow}>Пройти сейчас</button>
           </div>

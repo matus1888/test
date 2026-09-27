@@ -82,8 +82,39 @@ tr.sel { background: #1a2436 !important; }
 td.sym { font-weight: 600; }
 .table-wrap table.tf-table { min-width: 620px; }
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 0 0; }
+.topbar-right { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .brand { font-weight: 800; font-size: 15px; color: var(--text); text-decoration: none; }
 .brand:hover { color: #fff; }
+
+/* Режим торговли: переключатель в шапке, полоса под шапкой, метки окружения */
+.mode-switch { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.mode-seg button.mode-real { color: #f0a3a1; }
+.mode-seg button.mode-real.seg-active { background: rgba(239, 83, 80, 0.2) !important; color: #fff !important; }
+.env-badge {
+  display: inline-flex; align-items: center; vertical-align: middle;
+  border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase; border: 1px solid var(--border);
+}
+.env-badge.paper { color: #93c5fd; background: rgba(59, 130, 246, 0.12); border-color: rgba(59, 130, 246, 0.4); }
+.env-badge.real { color: #f0a3a1; background: rgba(239, 83, 80, 0.14); border-color: rgba(239, 83, 80, 0.45); }
+.mode-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  font-size: 12px; line-height: 1.4;
+}
+.mode-bar.paper { background: rgba(59, 130, 246, 0.08); border-color: rgba(59, 130, 246, 0.35); }
+.mode-bar.real { background: rgba(239, 83, 80, 0.1); border-color: rgba(239, 83, 80, 0.45); }
+.mode-bar.paper b { color: #93c5fd; }
+.mode-bar.real b { color: #f0a3a1; }
+.mode-bar-text, .mode-bar-status, .mode-bar-link { color: var(--muted); }
+.mode-bar-link a { color: var(--text); }
+.pf-chip.real { border-color: rgba(239, 83, 80, 0.45); }
+.pf-chip.real:hover { border-color: var(--neg); }
+.quick-entry.real { border-color: var(--neg); color: #f0a3a1; }
+.quick-entry.real:hover { background: rgba(239, 83, 80, 0.12); border-color: var(--neg); }
+.quick-trade .quick-open-real { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; }
+.quick-trade .quick-open-real { text-decoration: none; }
+
 .pf-chip {
   display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border);
   background: var(--panel); border-radius: 999px; padding: 6px 14px; font-size: 13px;

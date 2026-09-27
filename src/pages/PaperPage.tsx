@@ -15,6 +15,7 @@ import {
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
 import { rowKeyProps, setupCls } from '../lib/ui';
 import Term from '../components/Term';
+import EnvBadge from '../components/EnvBadge';
 import { useSessionState } from '../hooks/useSessionState';
 
 function isPositiveNumber(v: unknown): v is number {
@@ -105,8 +106,11 @@ export default function PaperPage() {
       <Link to="/" className="back">← Назад к скринеру</Link>
       <header className="top">
         <div>
-          <h1><Term t="paperTrading" label="Бумажный портфель" /></h1>
-          <p className="sub">Симуляция входов из торговых планов · хранится локально в браузере</p>
+          <h1><Term t="paperTrading" label="Бумажный портфель" /> <EnvBadge kind="paper" label="БУМАГА" title="Виртуальные сделки: реальные деньги не двигаются" /></h1>
+          <p className="sub">
+            Симуляция входов из торговых планов · хранится локально в браузере.
+            {' '}Реальные ордера — страница <Link to="/live">/live</Link>, реальный счёт — <Link to="/real">/real</Link>.
+          </p>
         </div>
       </header>
 

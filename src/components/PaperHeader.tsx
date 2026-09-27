@@ -1,20 +1,27 @@
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { usePaperPositions } from '../hooks/usePaper';
 import { useApiAccount } from '../hooks/useApiAccount';
 import { groupByCategory, useLivePrices } from '../hooks/useLivePrices';
+import { useTradingMode } from '../hooks/useTradingMode';
 import { totalPnlOf } from '../lib/paper';
+import { effectiveMode } from '../lib/tradeMode';
 import { fmt, fmtCompact } from '../lib/format';
 import Term from './Term';
+import TradeModeSwitch from './TradeModeSwitch';
 
 /** Округлённое число с группировкой разрядов (ru), например «7 463». */
 const fmtInt = (v: number) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(v);
 
 /**
- * Верхняя плашка. Если API подключён и снимок счёта пришёл — показываем реальные
- * equity/маржу/позиции Bybit; иначе — бумажный портфель из localStorage.
+ * Верхняя плашка: навигация, переключатель режима «Бумага ⇄ Реально» и портфель
+ * того режима, в котором мы сейчас. Портфель не подменяется молча: подпись всегда
+ * называет, чей это счёт — бумажный или реальный Bybit.
  */
 export default function PaperHeader() {
+  const { pathname } = useLocation();
   const api = useApiAccount();
+  const [mode] = useTradingMode();
+  const shown = effectiveMode(mode, pathname);
   const { positions } = usePaperPositions();
   const open = positions.filter((p) => p.status === 'open');
   const prices = useLivePrices(groupByCategory(open));
@@ -40,38 +47,45 @@ export default function PaperHeader() {
   return (
     <div className="topbar">
       <Link to="/" className="brand">Скринер Bybit</Link>
-      {api.state !== 'none' && (
-        <Link to="/real" className="api-link" title="Портфель реального счёта: капитал, маржа, позиции и ордера из API">Счёт</Link>
-      )}
-      <Link to="/live" className="api-link" title="Реальная торговля Bybit: план → ордер, позиции, активные ордера">Live</Link>
-      <Link to="/api" className="api-link" title="Подключение API Bybit: ключ, баланс и позиции">API</Link>
-      <Link to="/account" className="api-link" title="Личный кабинет: быстрый доступ и статусы">Кабинет</Link>
-      <button
-        type="button"
-        className="api-link"
-        title="Обзор приложения (walkthrough)"
-        onClick={() => window.dispatchEvent(new Event('open-walkthrough'))}
-      >?</button>
-      {live ? (
-        <Link
-          to="/real"
-          className="pf-chip"
-          title={`Реальный счёт Bybit (${api.testnet ? 'тестнет' : 'мейннет'}) · equity, маржа и позиции из API`}
-        >
-          <Term t="margin" label="Реальный счёт" />{' '}
-          <b>{fmtCompact(acc.wallet.totalEquity)} $</b>
-          <span className="muted"> · uP&L {acc.wallet.totalPerpUPL >= 0 ? '+' : ''}{fmt(acc.wallet.totalPerpUPL, 0)} $</span>
-          <span className="muted"> · {acc.positions.length} поз.</span>
-          <span className="muted"> · <Term t="margin" label="Занято" /> {fmtInt(used)} $</span>
-        </Link>
-      ) : (
-        <Link to="/paper" className="pf-chip" title="Бумажный портфель: P&L, открытые сделки и задействованный капитал">
-          <Term t="pnl" label="Портфель" />{' '}
-          <b className={cls}>{total >= 0 ? '+' : ''}{fmt(total)} $</b>
-          <span className="muted"> · {open.length} откр.</span>
-          <span className="muted"> · <Term t="margin" label="Задействовано" /> {fmtInt(engaged)} $</span>
-        </Link>
-      )}
+      <div className="topbar-right">
+        <Link to="/paper" className="api-link" title="Бумажный портфель: виртуальные сделки, P&L и разбор позиций">Бумага</Link>
+        <Link to="/live" className="api-link" title="Реальная торговля Bybit: план → ордер, позиции, активные ордера">Реально</Link>
+        <Link to="/api" className="api-link" title="Подключение API Bybit: ключ, баланс и позиции">API</Link>
+        <Link to="/account" className="api-link" title="Личный кабинет: быстрый доступ и статусы">Кабинет</Link>
+        <button
+          type="button"
+          className="api-link"
+          title="Обзор приложения (walkthrough)"
+          onClick={() => window.dispatchEvent(new Event('open-walkthrough'))}
+        >?</button>
+        <TradeModeSwitch />
+        {shown === 'real' ? (
+          live ? (
+            <Link
+              to="/real"
+              className="pf-chip real"
+              title={`Реальный счёт Bybit (${api.testnet ? 'тестнет' : 'мейннет'}) · equity, маржа и позиции из API`}
+            >
+              <Term t="realTrading" label="Реальный счёт" />{' '}
+              <b>{fmtCompact(acc.wallet.totalEquity)} $</b>
+              <span className="muted"> · uP&L {acc.wallet.totalPerpUPL >= 0 ? '+' : ''}{fmt(acc.wallet.totalPerpUPL, 0)} $</span>
+              <span className="muted"> · {acc.positions.length} поз.</span>
+              <span className="muted"> · <Term t="margin" label="Занято" /> {fmtInt(used)} $</span>
+            </Link>
+          ) : (
+            <Link to="/api" className="pf-chip real" title="Реальные ордера требуют ключ Bybit — подключить на странице /api">
+              <Term t="realTrading" label="Реальный счёт" /> <b>ключи не подключены →</b>
+            </Link>
+          )
+        ) : (
+          <Link to="/paper" className="pf-chip paper" title="Бумажный портфель: P&L, открытые сделки и задействованный капитал">
+            <Term t="paperTrading" label="Бумажный портфель" />{' '}
+            <b className={cls}>{total >= 0 ? '+' : ''}{fmt(total)} $</b>
+            <span className="muted"> · {open.length} откр.</span>
+            <span className="muted"> · <Term t="margin" label="Задействовано" /> {fmtInt(engaged)} $</span>
+          </Link>
+        )}
+      </div>
     </div>
   );
 }
