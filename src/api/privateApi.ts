@@ -4,8 +4,11 @@
 // POST order/create — 200 с retCode 10002 «invalid request»). Свой сервер не нужен.
 // ВАЖНО: секрет хранится в localStorage браузера. Для реальных денег используйте ключ
 // без права вывода и с ограничением по IP, либо API-ключ тестнета.
+// Для локальной работы ключи можно не вводить руками: положи их в `.env`
+// (API_KEY / API_SECRET / API_TESTNET) — dev-сервер подставит их сам, см. vite.config.ts.
 
 import type { Category } from './bybit';
+import devKeys from 'virtual:bybit-dev-keys';
 
 export interface ApiCredentials {
   key: string;
@@ -24,6 +27,14 @@ const RECV_WINDOW = 5000;
 const MAIN = 'https://api.bybit.com';
 const TESTNET = 'https://api-testnet.bybit.com';
 
+/**
+ * Ключи из `.env` — только для локального dev-сервера (`bun run dev`): их отдаёт
+ * виртуальный модуль `virtual:bybit-dev-keys` (плагин devBybitKeys в vite.config.ts).
+ * В сборке (`bun run build`) значения пустые, поэтому секреты не попадают в dist/.
+ * Приоритет: localStorage → `.env`.
+ */
+const DEV_BYBIT = devKeys;
+
 export function apiBase(testnet: boolean): string {
   return testnet ? TESTNET : MAIN;
 }
@@ -32,15 +43,41 @@ export function isCredentials(v: unknown): v is ApiCredentials {
   return typeof v === 'object' && v !== null && typeof (v as { key?: unknown }).key === 'string' && typeof (v as { secret?: unknown }).secret === 'string';
 }
 
+/** Валидирует сырые ключи (из `.env`): нужны непустые key и secret. */
+export function parseDevCredentials(raw: unknown): ApiCredentials | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const { key, secret, testnet } = raw as { key?: unknown; secret?: unknown; testnet?: unknown };
+  if (typeof key !== 'string' || key.trim() === '') return null;
+  if (typeof secret !== 'string' || secret.trim() === '') return null;
+  return { key: key.trim(), secret: secret.trim(), testnet: testnet === true };
+}
+
+/** Ключи из `.env` для локальной работы; null — если их нет или это сборка/тесты. */
+export function devCredentials(): ApiCredentials | null {
+  return parseDevCredentials(DEV_BYBIT);
+}
+
+/** Есть ли ключи, сохранённые самим пользователем в localStorage. */
+export function hasStoredCredentials(): boolean {
+  try {
+    return localStorage.getItem(STORE_KEY) != null;
+  } catch {
+    return false;
+  }
+}
+
+/** Ключи для приватных запросов: сначала localStorage, иначе `.env` (dev-сервер). */
 export function loadCredentials(): ApiCredentials | null {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (raw == null) return null;
-    const parsed: unknown = JSON.parse(raw);
-    return isCredentials(parsed) ? parsed : null;
+    if (raw != null) {
+      const parsed: unknown = JSON.parse(raw);
+      if (isCredentials(parsed)) return parsed;
+    }
   } catch {
-    return null;
+    /* localStorage недоступен или битый — пробуем .env */
   }
+  return devCredentials();
 }
 
 export function saveCredentials(c: ApiCredentials): void {
@@ -49,6 +86,7 @@ export function saveCredentials(c: ApiCredentials): void {
   } catch {
     /* localStorage недоступен — работаем без персиста */
   }
+  notifyCredentials();
 }
 
 export function clearCredentials(): void {
@@ -56,6 +94,21 @@ export function clearCredentials(): void {
     localStorage.removeItem(STORE_KEY);
   } catch {
     /* noop */
+  }
+  notifyCredentials();
+}
+
+/**
+ * Событие «ключи изменились»: страницы с хуком `useApiAccount` (шапка, /api, /real)
+ * перечитывают ключи, чтобы портфель сразу показал новый счёт.
+ */
+export const CREDENTIALS_EVENT = 'bybit:credentials-changed';
+
+function notifyCredentials(): void {
+  try {
+    window.dispatchEvent(new Event(CREDENTIALS_EVENT));
+  } catch {
+    /* нет window (тесты/SSR) — перечитывание не нужно */
   }
 }
 
@@ -126,6 +179,17 @@ export async function requestPrivate<T>(
 
 // ── Типы и типовые запросы ────────────────────────────────────────────────
 
+/**
+ * Bybit требует в «широких» запросах (order/realtime, order/cancel-all) либо symbol,
+ * либо монету расчётов: settleCoin для linear/inverse и baseCoin для spot.
+ * Без этого эндпоинты отвечают 10001 «Missing some parameters» (проверено на mainnet).
+ * Здесь предполагается USDT-расчёт — как и во всём остальном приватном API.
+ */
+function scopeParams(category: Category, symbol?: string): Record<string, string> {
+  if (symbol) return { symbol };
+  return category === 'spot' ? { baseCoin: 'USDT' } : { settleCoin: 'USDT' };
+}
+
 export interface CoinBalance {
   coin: string;
   walletBalance: number;
@@ -140,6 +204,12 @@ export interface WalletBalance {
   totalWalletBalance: number;
   totalMarginBalance: number;
   totalAvailableBalance: number;
+  /** Нереализованный P&L по перпетуарам (UNIFIED). */
+  totalPerpUPL: number;
+  /** Начальная маржа: занятая позициями + под висящими ордерами. */
+  totalInitialMargin: number;
+  totalPositionInitialMargin: number;
+  totalOrderInitialMargin: number;
   coins: CoinBalance[];
 }
 
@@ -150,6 +220,10 @@ export async function fetchWalletBalance(cred: ApiCredentials, accountType = 'UN
     totalWalletBalance: string;
     totalMarginBalance: string;
     totalAvailableBalance: string;
+    totalPerpUPL?: string;
+    totalInitialMargin?: string;
+    totalPositionInitialMargin?: string;
+    totalOrderInitialMargin?: string;
     list?: { coin: string; walletBalance: string; equity: string; availableToWithdraw: string; usdValue: string }[];
   }>('GET', '/v5/account/wallet-balance', { accountType }, cred);
   const num = (v?: string | number) => Number(v ?? 0);
@@ -159,6 +233,10 @@ export async function fetchWalletBalance(cred: ApiCredentials, accountType = 'UN
     totalWalletBalance: num(res.totalWalletBalance),
     totalMarginBalance: num(res.totalMarginBalance),
     totalAvailableBalance: num(res.totalAvailableBalance),
+    totalPerpUPL: num(res.totalPerpUPL),
+    totalInitialMargin: num(res.totalInitialMargin),
+    totalPositionInitialMargin: num(res.totalPositionInitialMargin),
+    totalOrderInitialMargin: num(res.totalOrderInitialMargin),
     coins: (res.list ?? []).map((c) => ({
       coin: c.coin,
       walletBalance: num(c.walletBalance),
@@ -273,7 +351,7 @@ export async function placeOrder(cred: ApiCredentials, args: PlaceOrderArgs): Pr
 export async function cancelAll(cred: ApiCredentials, category: Category, symbol?: string): Promise<void> {
   await requestPrivate('POST', '/v5/order/cancel-all', {
     category,
-    ...(symbol ? { symbol } : {}),
+    ...scopeParams(category, symbol),
   }, cred);
 }
 
@@ -293,7 +371,7 @@ export interface ActiveOrder {
 
 export async function fetchActiveOrders(cred: ApiCredentials, category: Category = 'linear', symbol?: string): Promise<ActiveOrder[]> {
   const res = await requestPrivate<{ list?: Record<string, string>[] }>(
-    'GET', '/v5/order/realtime', { category, ...(symbol ? { symbol } : {}) }, cred,
+    'GET', '/v5/order/realtime', { category, ...scopeParams(category, symbol) }, cred,
   );
   return (res.list ?? []).map((o) => ({
     orderId: String(o.orderId ?? ''),

@@ -1,6 +1,6 @@
 import { PlusIcon } from './icons';
 import Term from './Term';
-import { fmt, fmtCompact } from '../lib/format';
+import { fmt, fmtCompact, fmtPct } from '../lib/format';
 import type { PaperDirection } from '../lib/paper';
 
 const STAKES = [25, 50, 100, 250];
@@ -50,7 +50,7 @@ export default function QuickTrade({
         onKeyDown={(e) => { if (e.key === 'Enter' && !blockReason) onOpen(); }}
       />
       <span className="muted">({fmt(riskPct, 1)}% депо)</span>
-      <Term t="stake" label="Ставка" />
+      <Term t="stake" label="Ставка (потолок маржи)" />
       {STAKES.map((n) => (
         <button key={n} className={stake === n ? 'chip chip-active' : 'chip'} onClick={() => setStake(n)}>
           ${n}
@@ -71,7 +71,9 @@ export default function QuickTrade({
           ×{n}
         </button>
       ))}
-      <span className="muted">{fmt(qty, 4)} · {fmtCompact(qty * entryPrice)} $ по ~{fmt(entryPrice, decimals)} · маржа {fmt(marginNeeded)} $
+      <span className="muted">из депозита в этой сделке <b>{fmt(marginNeeded)} $</b>
+        {deposit > 0 ? ` (${fmtPct((marginNeeded / deposit) * 100, 0)} депо)` : ''}
+        {` · номинал ${fmtCompact(qty * entryPrice)} $ (×${lev} к марже) · ${fmt(qty, 4)} шт. по ~${fmt(entryPrice, decimals)}`}
         {liq != null ? ` · liq ~${fmt(liq, decimals)}${liqRatio != null ? ` (${liqRatio.toFixed(2)}x к стопу)` : ''}` : ''}
       </span>
       <button className={`btn ${long ? 'open-long' : 'open-short'}`} onClick={onOpen} disabled={blockReason != null}>

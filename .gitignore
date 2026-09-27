@@ -15,9 +15,14 @@ dist-ssr
 # Пакеты ставит bun — lock от npm не нужен
 package-lock.json
 
-# Бинарники Go-бота, собранные CI/локально (в сайт попадают через public/bot при деплое)
-# public/bot/
-# bot/bin/
+# Секреты: .env с ключами Bybit (API_KEY/API_SECRET) — только локально, в репозиторий .env.example
+.env
+.env.*
+!.env.example
+
+# План проверки mainnet-подключения: рабочий файл в проекте, но в репозиторий не коммитится.
+# Существенная часть правил продублирована в AGENTS.md.
+SESSION-MAINNET.md
 
 # Editor directories and files
 .vscode/*

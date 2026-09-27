@@ -1,69 +1,56 @@
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   clearCredentials,
-  fetchPositions,
-  fetchWalletBalance,
-  loadCredentials,
+  devCredentials,
+  hasStoredCredentials,
   saveCredentials,
   type ApiCredentials,
 } from '../api/privateApi';
+import { useApiAccount } from '../hooks/useApiAccount';
 import { fmt, fmtCompact } from '../lib/format';
 import Term from '../components/Term';
-
-interface ConnInfo {
-  wallet: Awaited<ReturnType<typeof fetchWalletBalance>>;
-  positions: Awaited<ReturnType<typeof fetchPositions>>;
-}
 
 const MAX_COINS = 8;
 
 /** Страница подключения к реальному API Bybit (ключ/секрет хранятся в браузере). */
 export default function ApiPage() {
-  const [cred, setCred] = useState<ApiCredentials | null>(() => loadCredentials());
-  const [key, setKey] = useState('');
-  const [secret, setSecret] = useState('');
-  const [testnet, setTestnet] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<ConnInfo | null>(null);
+  // Проверка подключения и снимок счёта — общий хук (он же крутит шапку и /real).
+  const api = useApiAccount();
+  // Ключи из .env подставляются только локальным dev-сервером (vite.config.ts, devBybitKeys).
+  const [dev] = useState<ApiCredentials | null>(() => devCredentials());
+  const [key, setKey] = useState(() => dev?.key ?? '');
+  const [secret, setSecret] = useState(() => dev?.secret ?? '');
+  const [testnet, setTestnet] = useState(() => dev?.testnet ?? false);
+  const [formError, setFormError] = useState<string | null>(null);
 
-  const connect = useCallback(async (c: ApiCredentials) => {
-    setBusy(true);
-    setError(null);
-    setInfo(null);
-    try {
-      const [wallet, positions] = await Promise.all([
-        fetchWalletBalance(c),
-        fetchPositions(c),
-      ]);
-      setInfo({ wallet, positions });
-      saveCredentials(c);
-      setCred(c);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, []);
+  const cred = api.cred;
+  const info = api.account;
+  const busy = api.isFetching;
+  const error = formError ?? (cred && !info ? api.error : null);
+  const fromEnv = dev != null && !hasStoredCredentials();
 
   const saveAndCheck = () => {
     const k = key.trim();
     const s = secret.trim();
     if (!k || !s) {
-      setError('Введи API-ключ и секрет.');
+      setFormError('Введи API-ключ и секрет.');
       return;
     }
-    void connect({ key: k, secret: s, testnet });
+    setFormError(null);
+    // Ключи из .env не сохраняем без явного действия пользователя.
+    if (dev == null || k !== dev.key || s !== dev.secret || testnet !== dev.testnet) {
+      saveCredentials({ key: k, secret: s, testnet });
+    }
+    api.reload();
   };
 
   const remove = () => {
     clearCredentials();
-    setCred(null);
-    setInfo(null);
-    setError(null);
-    setKey('');
-    setSecret('');
+    setFormError(null);
+    setKey(dev?.key ?? '');
+    setSecret(dev?.secret ?? '');
+    setTestnet(dev?.testnet ?? false);
   };
 
   const reusableCoins = (info?.wallet.coins ?? []).filter((c) => c.usdValue > 0).slice(0, MAX_COINS);
@@ -81,9 +68,21 @@ export default function ApiPage() {
       <section className="cards">
         <div className="card">
           <h3>Статус</h3>
-          <div className="lvl"><span>Ключ</span><b>{cred ? (cred.testnet ? 'Тестнет · настроен' : 'Мейннет · настроен') : 'Не настроен'}</b></div>
+          <div className="lvl">
+            <span>Ключ</span>
+            <b>
+              {cred
+                ? fromEnv
+                  ? `${cred.testnet ? 'Тестнет' : 'Мейннет'} · из .env${info ? ' · проверен' : ''}`
+                  : cred.testnet ? 'Тестнет · настроен' : 'Мейннет · настроен'
+                : 'Не настроен'}
+            </b>
+          </div>
           {cred && (
             <div className="lvl"><span>API-key</span><b className="muted">{cred.key.slice(0, 8)}…{cred.key.slice(-4)}</b></div>
+          )}
+          {fromEnv && (
+            <div className="lvl"><span>Источник</span><b className="muted">.env (локальный dev-сервер) · подключение проверяется автоматически</b></div>
           )}
         </div>
         {!cred ? (
@@ -106,6 +105,12 @@ export default function ApiPage() {
                 {busy ? 'Проверка…' : 'Сохранить и проверить'}
               </button>
             </div>
+            {dev && (
+              <p className="state">
+                Ключи подставлены из <b>.env</b> (API_KEY / API_SECRET / API_TESTNET) — это работает только
+                на локальном dev-сервере, в сборку они не попадают. Можно изменить значения в полях.
+              </p>
+            )}
             <p className="state err-note">
               ⚠️ Для реальных денег используй API-ключ <b>без права вывода</b> и с ограничением по IP.
               Для отладки безопаснее тестнет.
@@ -115,11 +120,12 @@ export default function ApiPage() {
           <div className="card">
             <h3>Действия</h3>
             <div className="controls">
-              <button className="btn" onClick={() => void connect(cred)} disabled={busy}>
+              <button className="btn" onClick={api.reload} disabled={busy}>
                 {busy ? 'Проверка…' : 'Проверить подключение'}
               </button>
               <button className="btn btn-danger" onClick={remove}>Удалить ключи</button>
             </div>
+            {dev && <p className="muted">После удаления ключи из <b>.env</b> подставятся снова — это поведение нужно только локально.</p>}
           </div>
         )}
       </section>

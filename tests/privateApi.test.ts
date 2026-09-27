@@ -2,10 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHmac } from 'node:crypto';
 import {
   buildQuery,
+  cancelAll,
   clearCredentials,
+  devCredentials,
+  fetchActiveOrders,
   fetchWalletBalance,
+  hasStoredCredentials,
   hmacHex,
   loadCredentials,
+  parseDevCredentials,
   requestPrivate,
   saveCredentials,
 } from '../src/api/privateApi';
@@ -85,6 +90,49 @@ describe('requestPrivate', () => {
   });
 });
 
+describe('широкие запросы без symbol (живая проверка mainnet)', () => {
+  const capture = () => {
+    const state: { url?: string; body?: string } = {};
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      state.url = String(url);
+      state.body = init.body ? String(init.body) : undefined;
+      return { ok: true, text: async () => JSON.stringify({ retCode: 0, retMsg: 'OK', result: { list: [] } }) };
+    }));
+    return state;
+  };
+  const cred = { key: 'K', secret: 'S', testnet: false };
+
+  it('order/realtime без символа → settleCoin=USDT (иначе 10001)', async () => {
+    const s = capture();
+    await fetchActiveOrders(cred, 'linear');
+    expect(s.url).toBe('https://api.bybit.com/v5/order/realtime?category=linear&settleCoin=USDT');
+  });
+
+  it('order/realtime со символом → symbol, без settleCoin', async () => {
+    const s = capture();
+    await fetchActiveOrders(cred, 'linear', 'BTCUSDT');
+    expect(s.url).toBe('https://api.bybit.com/v5/order/realtime?category=linear&symbol=BTCUSDT');
+  });
+
+  it('order/realtime для spot → baseCoin', async () => {
+    const s = capture();
+    await fetchActiveOrders(cred, 'spot');
+    expect(s.url).toBe('https://api.bybit.com/v5/order/realtime?baseCoin=USDT&category=spot');
+  });
+
+  it('cancel-all без символа → settleCoin=USDT', async () => {
+    const s = capture();
+    await cancelAll(cred, 'linear');
+    expect(s.body).toBe(JSON.stringify({ category: 'linear', settleCoin: 'USDT' }));
+  });
+
+  it('cancel-all со символом → symbol', async () => {
+    const s = capture();
+    await cancelAll(cred, 'linear', 'BTCUSDT');
+    expect(s.body).toBe(JSON.stringify({ category: 'linear', symbol: 'BTCUSDT' }));
+  });
+});
+
 describe('wallet / credentials', () => {
   it('fetchWalletBalance парсит result', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
@@ -104,12 +152,82 @@ describe('wallet / credentials', () => {
     const w = await fetchWalletBalance({ key: 'K', secret: 'S', testnet: false });
     expect(w.totalEquity).toBe(1234.5);
     expect(w.coins[0]).toMatchObject({ coin: 'USDT', walletBalance: 1200 });
+    // Поля маржи и uP&L: если биржа их не прислала — нули, не NaN (страница /real их рисует).
+    expect(w.totalPerpUPL).toBe(0);
+    expect(w.totalInitialMargin).toBe(0);
+    expect(w.totalAvailableBalance).toBe(0);
+  });
+
+  it('fetchWalletBalance парсит маржу и нереализованный P&L', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      text: async () => JSON.stringify({
+        retCode: 0,
+        retMsg: 'OK',
+        result: {
+          accountType: 'UNIFIED',
+          totalEquity: '1010',
+          totalWalletBalance: '1000',
+          totalMarginBalance: '10',
+          totalAvailableBalance: '990',
+          totalPerpUPL: '10',
+          totalInitialMargin: '55',
+          totalPositionInitialMargin: '50',
+          totalOrderInitialMargin: '5',
+          list: [],
+        },
+      }),
+    })));
+    const w = await fetchWalletBalance({ key: 'K', secret: 'S', testnet: true });
+    expect(w).toMatchObject({
+      totalPerpUPL: 10,
+      totalInitialMargin: 55,
+      totalPositionInitialMargin: 50,
+      totalOrderInitialMargin: 5,
+      totalAvailableBalance: 990,
+    });
   });
 
   it('credentials: без localStorage load → null, save/clear безопасны', () => {
     expect(loadCredentials()).toBeNull();
     saveCredentials({ key: 'K', secret: 'S', testnet: false });
     clearCredentials();
+    expect(loadCredentials()).toBeNull();
+  });
+});
+
+describe('ключи из .env (локальный dev-сервер)', () => {
+  it('parseDevCredentials: обрезает пробелы, testnet только при true', () => {
+    expect(parseDevCredentials({ key: ' K ', secret: ' S ', testnet: true })).toEqual({ key: 'K', secret: 'S', testnet: true });
+    expect(parseDevCredentials({ key: 'K', secret: 'S', testnet: 'yes' })).toEqual({ key: 'K', secret: 'S', testnet: false });
+  });
+
+  it('parseDevCredentials: без ключа/секрета или с пустыми — null', () => {
+    expect(parseDevCredentials(undefined)).toBeNull();
+    expect(parseDevCredentials(null)).toBeNull();
+    expect(parseDevCredentials({})).toBeNull();
+    expect(parseDevCredentials({ key: 'K' })).toBeNull();
+    expect(parseDevCredentials({ key: '   ', secret: 'S' })).toBeNull();
+    expect(parseDevCredentials({ key: 1, secret: 'S' })).toBeNull();
+  });
+
+  it('в тестах/сборке константы __DEV_BYBIT__ нет → devCredentials() null, localStorage главнее', () => {
+    // Сборка и vitest не получают define из vite.config.ts — секреты туда не попадают.
+    expect(devCredentials()).toBeNull();
+    // В node-окружении localStorage нет: проверяем, что всё безопасно, и отдельно — с хранилищем.
+    expect(hasStoredCredentials()).toBe(false);
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+    expect(hasStoredCredentials()).toBe(false);
+    saveCredentials({ key: 'K', secret: 'S', testnet: true });
+    expect(hasStoredCredentials()).toBe(true);
+    expect(loadCredentials()).toEqual({ key: 'K', secret: 'S', testnet: true });
+    clearCredentials();
+    expect(hasStoredCredentials()).toBe(false);
     expect(loadCredentials()).toBeNull();
   });
 });

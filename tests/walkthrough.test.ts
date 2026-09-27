@@ -3,9 +3,8 @@ import { STEPS, WALKTHROUGH_KEY, markSeen, shouldAutoOpen } from '../src/lib/gui
 
 describe('walkthrough', () => {
   it('steps: содержательные и с уникальными заголовками', () => {
-    // 5 шагов: скринер, фильтры, план символа, вход, портфель.
-    // API/live/bot заблокированы из-за региональных ограничений и в обзор не входят.
-    expect(STEPS.length).toBeGreaterThanOrEqual(5);
+    // 7 шагов: скринер, фильтры, план символа, вход, портфель, подключение API, реальная торговля.
+    expect(STEPS.length).toBeGreaterThanOrEqual(7);
     const titles = STEPS.map((s) => s.title);
     expect(new Set(titles).size).toBe(titles.length);
     for (const s of STEPS) {
@@ -15,7 +14,7 @@ describe('walkthrough', () => {
 
   it('маршруты шагов ведут на существующие страницы', () => {
     const routes = STEPS.map((s) => s.route).filter((r): r is string => r != null);
-    expect(new Set(routes)).toEqual(new Set(['/', '/paper']));
+    expect(new Set(routes)).toEqual(new Set(['/', '/paper', '/api', '/live']));
   });
 
   it('shouldAutoOpen: без сохранённого флага — да, markSeen безопасен', () => {

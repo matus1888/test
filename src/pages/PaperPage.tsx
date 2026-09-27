@@ -15,6 +15,11 @@ import {
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
 import { rowKeyProps, setupCls } from '../lib/ui';
 import Term from '../components/Term';
+import { useSessionState } from '../hooks/useSessionState';
+
+function isPositiveNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0;
+}
 
 export default function PaperPage() {
   const navigate = useNavigate();
@@ -80,6 +85,16 @@ export default function PaperPage() {
   }
   const wins = closed.filter((p) => totalPnlOf(p, p.closePrice ?? p.entryPrice).net > 0).length;
 
+  // Сколько денег депозита реально занято открытыми сделками: сумма марж (номинал/плечо).
+  let openMargin = 0;
+  let openNotional = 0;
+  for (const p of open) {
+    const r = totalPnlOf(p, priceOf(p));
+    openMargin += r.margin;
+    openNotional += r.notional;
+  }
+  const deposit = useSessionState<number>('symbol:deposit', 1000, isPositiveNumber)[0];
+
   const erase = (e: React.MouseEvent, id: string, symbol: string) => {
     e.stopPropagation();
     if (window.confirm(`Удалить позицию ${symbol} из журнала?`)) remove(id);
@@ -111,6 +126,14 @@ export default function PaperPage() {
           <h3><Term t="position" label="Позиции" /></h3>
           <div className="lvl"><span>Открыто</span><b>{open.length}</b></div>
           <div className="lvl"><span>Закрыто</span><b>{closed.length}</b></div>
+          <div className="lvl">
+            <span><Term t="margin" label="Занято из депозита" /></span>
+            <b>{open.length > 0 ? `${fmt(openMargin)} $ · ${fmtPct((openMargin / deposit) * 100, 0)}` : '—'}</b>
+          </div>
+          <div className="lvl">
+            <span>Торговый номинал</span>
+            <b className="muted">{open.length > 0 ? `${fmtCompact(openNotional)} $ (×${(openNotional / Math.max(openMargin, 1)).toFixed(1)} к марже)` : '—'}</b>
+          </div>
         </div>
         <div className="card">
           <h3><Term t="expectancy" label="Качество" /></h3>
@@ -130,7 +153,7 @@ export default function PaperPage() {
                 <th><Term t="direction" label="Сторона" /></th>
                 <th><Term t="entryMid" label="Вход" /></th>
                 <th>Выход / тек.</th>
-                <th><Term t="stake" label="Ставка / маржа" /></th>
+                <th>Из депозита в сделке</th>
                 <th><Term t="pnl" label="P&L" /></th>
                 <th>Статус</th>
                 <th></th>
@@ -152,7 +175,15 @@ export default function PaperPage() {
                     <td className={setupCls(p.direction)}>{p.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'}</td>
                     <td>{fmt(p.entryPrice, 4)}<br /><span className="muted">{fmtTime(p.openedAt)}</span></td>
                     <td>{fmt(exit, 4)}</td>
-                    <td>{fmt(p.stake)} $ ×{p.leverage}<br /><span className="muted">маржа {fmt(r.margin)} $ · номинал {fmtCompact(r.notional)}</span></td>
+                    <td>
+                      <b>{fmt(r.margin)} $</b>
+                      <br />
+                      <span className="muted">
+                        номинал {fmtCompact(r.notional)} $ · ×{p.leverage}
+                        <br />
+                        риск стопа {fmtCompact(p.qty * Math.abs(p.entryPrice - p.stop))} $ · лимит ставки {fmt(p.stake)} $
+                      </span>
+                    </td>
                     <td className={r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : ''}>
                       {r.net >= 0 ? '+' : ''}{fmt(r.net)} $ ({fmtPct(r.netMarginPct, 1)})
                     </td>

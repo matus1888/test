@@ -25,8 +25,9 @@ h1 { margin: 0; font-size: 26px; }
 .btn:disabled { opacity: 0.6; cursor: default; }
 .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-.seg button {
+.seg button, .seg a {
   background: transparent; color: var(--muted); border: 0; padding: 8px 14px; cursor: pointer;
+  text-decoration: none; font: inherit; display: inline-block;
 }
 .seg-active { background: #1e293b !important; color: #fff !important; }
 label { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
@@ -69,14 +70,6 @@ select, .search {
 .dash-card b { color: var(--text); font-size: 16px; }
 .apiform label { flex-wrap: wrap; }
 .apiform input, .apiform select { flex: 1; min-width: 0; }
-.bot-steps li { margin: 4px 0; font-size: 14px; }
-.bot-pre {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-  padding: 12px; font-size: 12px; overflow: auto; color: var(--muted); margin: 10px 0;
-}
-.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
-.form-grid label { flex-wrap: wrap; }
-.form-grid input { flex: 1; min-width: 0; }
 .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
 table { border-collapse: collapse; width: 100%; font-size: 13px; min-width: 1100px; }
 th, td { padding: 8px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid #1a1e25; }

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { usePaperPositions } from '../hooks/usePaper';
+import { useApiAccount } from '../hooks/useApiAccount';
 import { groupByCategory, useLivePrices } from '../hooks/useLivePrices';
 import { totalPnlOf } from '../lib/paper';
 import { WALKTHROUGH_KEY, shouldAutoOpen } from '../lib/guide';
@@ -16,11 +17,15 @@ interface DashLink {
 const LINKS: DashLink[] = [
   { route: '/', title: 'Скринер', desc: 'Ранжирование монет по приоритету, фильтры и быстрый вход.' },
   { route: '/paper', title: 'Бумажный портфель', desc: 'P&L, открытые позиции, лесенка и разбор сделок.' },
+  { route: '/real', title: 'Портфель Bybit', desc: 'Реальный счёт по API: капитал, маржа, позиции и активные ордера.' },
+  { route: '/api', title: 'Подключение API', desc: 'Ключ Bybit, баланс и позиции; локально ключи берутся из .env.' },
+  { route: '/live', title: 'Реальная торговля', desc: 'План → ордер, лесенка TP1/2/3, безубыток и закрытие по рынку.' },
 ];
 
 /** Личный кабинет: быстрый доступ к разделам, статусы и управление обучением. */
 export default function AccountPage() {
   const [learning, setLearningState] = useState(() => shouldAutoOpen());
+  const api = useApiAccount();
   const { positions } = usePaperPositions();
   const open = positions.filter((p) => p.status === 'open');
   const prices = useLivePrices(groupByCategory(open));
@@ -89,6 +94,43 @@ export default function AccountPage() {
           <div className="lvl"><span>Общий P&L</span><b className={net >= 0 ? 'pos' : net < 0 ? 'neg' : ''}>{net >= 0 ? '+' : ''}{fmt(net)} $</b></div>
           <div className="lvl"><span>Открытых</span><b>{open.length}</b></div>
           <div className="lvl"><span>Задействовано</span><b>{fmt(engaged)} $</b></div>
+        </div>
+
+        <div className="card">
+          <h3>Реальный счёт</h3>
+          {api.state === 'none' ? (
+            <div className="lvl">
+              <span>API</span>
+              <b className="muted"><Link to="/api">не подключён</Link></b>
+            </div>
+          ) : api.state === 'on' && api.account ? (
+            <>
+              <div className="lvl">
+                <span>Сеть</span>
+                <b>{api.testnet ? 'тестнет' : 'мейннет'}</b>
+              </div>
+              <div className="lvl">
+                <span>Equity</span>
+                <b>{fmt(api.account.wallet.totalEquity, 2)} $</b>
+              </div>
+              <div className="lvl">
+                <span>Позиций / ордеров</span>
+                <b>{api.account.positions.length} / {api.account.orders.length}</b>
+              </div>
+              <div className="lvl">
+                <span>Занято маржой</span>
+                <b>{fmt(api.account.wallet.totalInitialMargin, 2)} $</b>
+              </div>
+            </>
+          ) : (
+            <div className="lvl">
+              <span>API</span>
+              <b className="neg">{api.state === 'error' ? `ошибка: ${api.error}` : 'проверяю…'}</b>
+            </div>
+          )}
+          <div className="controls">
+            <Link to="/real" className="btn btn-sm">Открыть портфель</Link>
+          </div>
         </div>
       </section>
 

@@ -4,16 +4,18 @@ import ScreenerPage from './pages/ScreenerPage';
 import SymbolPage from './pages/SymbolPage';
 import PaperPage from './pages/PaperPage';
 import PaperDetailPage from './pages/PaperDetailPage';
+import ApiPage from './pages/ApiPage';
+import LivePage from './pages/LivePage';
 import AccountPage from './pages/AccountPage';
+import RealPortfolioPage from './pages/RealPortfolioPage';
 import PaperHeader from './components/PaperHeader';
 import Walkthrough from './components/Walkthrough';
-import BlockedFeature from './components/BlockedFeature';
 import { shouldAutoOpen } from './lib/guide';
 
-// /api, /live, /bot отключены из-за региональных ограничений: ключи тестнета не выдаются,
-// мейннет не проверен, Telegram-бот не работает. Страницы ApiPage/LivePage/BotPage и модули
-// api/privateApi.ts, api/live.ts остались в репозитории — вернуть их в роуты достаточно снять
-// блокировку (заглушка — components/BlockedFeature.tsx).
+// /api и /live открыты: блокировка из-за региональных ограничений снята по решению владельца.
+// Ключи для локальной работы подхватываются из .env (см. vite.config.ts, devBybitKeys) —
+// ввод руками на /api остаётся рабочим запасным вариантом. Сценарий проверки:
+// SESSION-MAINNET.md (локальный файл, в репозиторий не коммитится) + раздел в AGENTS.md.
 
 export default function App() {
   const [tourOpen, setTourOpen] = useState(() => shouldAutoOpen());
@@ -32,10 +34,10 @@ export default function App() {
         <Route path="/s/:category/:symbol" element={<SymbolPage />} />
         <Route path="/paper" element={<PaperPage />} />
         <Route path="/paper/:id" element={<PaperDetailPage />} />
-        <Route path="/api" element={<BlockedFeature kind="api" />} />
-        <Route path="/live" element={<BlockedFeature kind="live" />} />
+        <Route path="/real" element={<RealPortfolioPage />} />
+        <Route path="/api" element={<ApiPage />} />
+        <Route path="/live" element={<LivePage />} />
         <Route path="/account" element={<AccountPage />} />
-        <Route path="/bot" element={<BlockedFeature kind="bot" />} />
         <Route path="*" element={<ScreenerPage />} />
       </Routes>
       <Walkthrough key={tourOpen ? 'on' : 'off'} open={tourOpen} onClose={() => setTourOpen(false)} />
