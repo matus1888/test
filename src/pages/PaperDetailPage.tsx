@@ -1,8 +1,9 @@
 import { useEffect, useMemo } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { fetchKlines, fetchTickers } from '../api/bybit';
+import { fetchKlines } from '../api/bybit';
 import { usePaperPositions } from '../hooks/usePaper';
+import { groupByCategory, useLivePrices } from '../hooks/useLivePrices';
 import {
   closeLabel,
   evaluatePosition,
@@ -16,6 +17,7 @@ import {
   type PaperPosition,
 } from '../lib/paper';
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
+import { effectiveCycleMs } from '../lib/klinePlan';
 import StrategyChart from '../components/StrategyChart';
 import Term from '../components/Term';
 import type { TradePlan } from '../lib/tradePlan';
@@ -58,18 +60,18 @@ export default function PaperDetailPage() {
   const { positions, closeManual, settle, remove } = usePaperPositions();
   const pos = positions.find((p) => p.id === id);
 
-  const tickers = useQuery({
-    queryKey: ['tickers', pos?.category ?? 'linear'],
-    queryFn: () => fetchTickers(pos!.category),
-    enabled: !!pos,
-    staleTime: 30_000,
-    refetchInterval: 30_000,
-  });
+  // Живая цена — из сокета (REST остаётся страховкой до первого кадра).
+  const prices = useLivePrices(pos ? groupByCategory([pos]) : []);
+  // MFE/MAE и авто-закрытие считаются по закрытым свечам, поэтому обновляемся
+  // по закрытию интервала, а не каждые 30 секунд.
+  const cycleMs = effectiveCycleMs(pos?.interval ?? '5', 60_000) || 60_000;
   const klines = useQuery({
     queryKey: pos ? ['kline', pos.category, pos.symbol, pos.interval, 200] : ['kline', 'none'],
     queryFn: () => fetchKlines(pos!.category, pos!.symbol, pos!.interval, 200),
     enabled: !!pos,
-    staleTime: 30_000,
+    staleTime: cycleMs,
+    refetchInterval: cycleMs,
+    refetchOnWindowFocus: false,
     retry: 1,
   });
 
@@ -92,7 +94,7 @@ export default function PaperDetailPage() {
     );
   }
 
-  const live = tickers.data?.find((t) => t.symbol === pos.symbol)?.lastPrice ?? pos.entryPrice;
+  const live = prices.get(`${pos.category}:${pos.symbol}`) ?? pos.entryPrice;
   const exit = pos.status === 'open' ? live : (pos.closePrice ?? pos.entryPrice);
   const r = totalPnlOf(pos, exit);
   const exitTime = pos.status === 'open' ? Date.now() : (pos.closedAt ?? pos.openedAt);

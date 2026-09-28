@@ -194,6 +194,25 @@ describe('wallet / credentials', () => {
     clearCredentials();
     expect(loadCredentials()).toBeNull();
   });
+
+  it('session-режим: saveCredentials(..., false) не пишет в localStorage, persist=true вытесняет', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+    // Без персиста: пусто в хранилище, но loadCredentials отдаёт сессионные.
+    saveCredentials({ key: 'S1', secret: 'S1', testnet: true }, false);
+    expect(hasStoredCredentials()).toBe(false);
+    expect(loadCredentials()).toEqual({ key: 'S1', secret: 'S1', testnet: true });
+    // Персист вытесняет сессионные.
+    saveCredentials({ key: 'P1', secret: 'P1', testnet: false });
+    expect(hasStoredCredentials()).toBe(true);
+    expect(loadCredentials()).toEqual({ key: 'P1', secret: 'P1', testnet: false });
+    clearCredentials();
+    expect(loadCredentials()).toBeNull();
+  });
 });
 
 describe('ключи из .env (локальный dev-сервер)', () => {

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useQueries } from '@tanstack/react-query';
 import { fetchKlines, type Candle } from '../api/bybit';
@@ -11,11 +11,14 @@ import {
   fmtTime,
   settleOpen,
   totalPnlOf,
+  type PaperPosition,
 } from '../lib/paper';
+import { candleKey, effectiveCycleMs } from '../lib/klinePlan';
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
 import { rowKeyProps, setupCls } from '../lib/ui';
 import Term from '../components/Term';
 import EnvBadge from '../components/EnvBadge';
+import PaperAnalytics from '../components/PaperAnalytics';
 import { useSessionState } from '../hooks/useSessionState';
 
 function isPositiveNumber(v: unknown): v is number {
@@ -24,23 +27,35 @@ function isPositiveNumber(v: unknown): v is number {
 
 export default function PaperPage() {
   const navigate = useNavigate();
-  const { positions, settle, remove, closeManual } = usePaperPositions();
+  const { positions, settle, remove, closeManual, closeAll } = usePaperPositions();
 
   // Свечи по каждой позиции — для авто-закрытий и колонки «что сработало».
+  // Ключи дедуплицируются: две позиции по одному символу и ТФ — это один запрос,
+  // а не два одинаковых ключа (на это ругается React Query).
+  // Обновляем по закрытию свечи: стопы и тейки проверяются на закрытых свечах,
+  // а рефетч каждые 30 с на 5 мин просто повторял один и тот же ответ.
+  const uniqueKlines = useMemo(() => {
+    const m = new Map<string, PaperPosition>();
+    for (const p of positions) m.set(candleKey(p.category, p.symbol, p.interval), p);
+    return [...m.values()];
+  }, [positions]);
+
   // `combine` мемоизирует результат: карта стабильна между рендерами, поэтому
   // эффект ниже не пересчитывается на каждый рендер.
   const candlesByPos = useQueries({
-    queries: positions.map((p) => ({
+    queries: uniqueKlines.map((p) => ({
       queryKey: ['kline', p.category, p.symbol, p.interval, 200],
       queryFn: () => fetchKlines(p.category, p.symbol, p.interval, 200),
-      staleTime: 60_000,
+      staleTime: effectiveCycleMs(p.interval, 60_000) || 60_000,
+      refetchInterval: effectiveCycleMs(p.interval, 60_000) || 60_000,
+      refetchOnWindowFocus: false,
       retry: 1,
     })),
     combine: (results) => {
       const m = new Map<string, Candle[]>();
-      positions.forEach((p, i) => {
+      uniqueKlines.forEach((p, i) => {
         const data = results[i]?.data;
-        if (data) m.set(p.id, data);
+        if (data) m.set(candleKey(p.category, p.symbol, p.interval), data);
       });
       return m;
     },
@@ -51,7 +66,7 @@ export default function PaperPage() {
     const list: { id: string; info: NonNullable<ReturnType<typeof settleOpen>> }[] = [];
     for (const p of positions) {
       if (p.status !== 'open') continue;
-      const info = settleOpen(p, candlesByPos.get(p.id));
+      const info = settleOpen(p, candlesByPos.get(candleKey(p.category, p.symbol, p.interval)));
       if (info) list.push({ id: p.id, info });
     }
     if (list.length > 0) settle(list);
@@ -66,7 +81,7 @@ export default function PaperPage() {
   let tp1n = 0;
   for (const p of closed) {
     rSum += totalPnlOf(p, p.closePrice ?? p.entryPrice).netR;
-    const ev = evaluatePosition(p, candlesByPos.get(p.id) ?? []);
+    const ev = evaluatePosition(p, candlesByPos.get(candleKey(p.category, p.symbol, p.interval)) ?? []);
     if (!ev.partial && ev.maxTp >= 1) tp1n += 1;
   }
   const avgR = closed.length > 0 ? rSum / closed.length : null;
@@ -149,7 +164,24 @@ export default function PaperPage() {
       {positions.length === 0 ? (
         <p className="state">Пока нет бумажных позиций. Открой первую со страницы символа — кнопка под торговым планом.</p>
       ) : (
-        <div className="table-wrap">
+        <>
+          {open.length > 0 && (
+            <div className="table-actions">
+              {/* TODO(crash): «Закрыть все» роняет вкладку после confirm — разобраться
+                  (подозрение: бесконечный ре-рендер при опустошении портфеля/сокетов),
+                  затем вернуть в работу и добавить e2e-проверку. Кнопка временно disabled. */}
+              <button
+                className="btn btn-sm btn-close-all"
+                disabled
+                onClick={() => {
+                  if (!window.confirm(`Закрыть все открытые позиции (${open.length}) по текущим ценам?`)) return;
+                  closeAll(priceOf);
+                }}
+                title="Временно отключено: закрытие всех роняет страницу — идёт разбор причины"
+              >Закрыть все</button>
+            </div>
+          )}
+          <div className="table-wrap">
           <table>
             <thead>
               <tr>
@@ -167,7 +199,7 @@ export default function PaperPage() {
               {positions.map((p) => {
                 const exit = priceOf(p);
                 const r = totalPnlOf(p, exit);
-                const ev = evaluatePosition(p, candlesByPos.get(p.id) ?? []);
+                const ev = evaluatePosition(p, candlesByPos.get(candleKey(p.category, p.symbol, p.interval)) ?? []);
                 const reached = new Set([
                   ...(p.legs ?? []).map((l) => l.reason),
                   ...ev.events.filter((e) => e.type === 'tp1' || e.type === 'tp2' || e.type === 'tp3').map((e) => e.type),
@@ -211,8 +243,11 @@ export default function PaperPage() {
               })}
             </tbody>
           </table>
-        </div>
+          </div>
+        </>
       )}
+
+      <PaperAnalytics closed={closed.filter((p) => p.status === 'closed')} />
 
       <footer className="foot">
         Открытые позиции переоцениваются по живым тикерам. TP1 фиксирует 70% позиции, TP2 — ещё 20%, остаток идёт до TP3; после TP1 стоп переносится в безубыток. P&L показан чистыми — за вычетом комиссии за круг (тейкер). P&L в $ = движение цены × количество и не зависит от плеча; проценты — к марже (номинал/плечо) и к ставке. Клик по строке — детальный разбор.

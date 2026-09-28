@@ -34,3 +34,8 @@ SESSION-MAINNET.md
 *.njsproj
 *.sln
 *.sw?
+
+# Артефакты бэктест-стенда: кэш свечей/фандинга и отчёт прогона.
+# (scripts/universe.json хранится в репо — фиксирует выборку для сравнимых прогонов)
+scripts/.cache/
+scripts/backtest-report.json

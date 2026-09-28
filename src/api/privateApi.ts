@@ -23,6 +23,8 @@ interface PrivateResult<T> {
 }
 
 const STORE_KEY = 'bybit:api:credentials:v1';
+/** Ключи «не сохранять» — только в памяти текущей вкладки, не персистятся. */
+let sessionCreds: ApiCredentials | null = null;
 const RECV_WINDOW = 5000;
 const MAIN = 'https://api.bybit.com';
 const TESTNET = 'https://api-testnet.bybit.com';
@@ -66,8 +68,9 @@ export function hasStoredCredentials(): boolean {
   }
 }
 
-/** Ключи для приватных запросов: сначала localStorage, иначе `.env` (dev-сервер). */
+/** Ключи для приватных запросов: сессионные (не персистенные) → localStorage → `.env`. */
 export function loadCredentials(): ApiCredentials | null {
+  if (sessionCreds != null) return sessionCreds;
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw != null) {
@@ -80,16 +83,31 @@ export function loadCredentials(): ApiCredentials | null {
   return devCredentials();
 }
 
-export function saveCredentials(c: ApiCredentials): void {
-  try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(c));
-  } catch {
-    /* localStorage недоступен — работаем без персиста */
+/**
+ * Сохранить ключи. `persist: false` — только в память вкладки (локальная сессия),
+ * ничего не пишется на диск браузера; после закрытия вкладки ключи исчезают.
+ */
+export function saveCredentials(c: ApiCredentials, persist = true): void {
+  if (persist) {
+    sessionCreds = null;
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(c));
+    } catch {
+      /* localStorage недоступен — работаем без персиста */
+    }
+  } else {
+    sessionCreds = c;
+    try {
+      localStorage.removeItem(STORE_KEY);
+    } catch {
+      /* noop */
+    }
   }
   notifyCredentials();
 }
 
 export function clearCredentials(): void {
+  sessionCreds = null;
   try {
     localStorage.removeItem(STORE_KEY);
   } catch {
@@ -279,7 +297,7 @@ export async function fetchPositions(cred: ApiCredentials, category: Category = 
     stopLoss: p.stopLoss ? Number(p.stopLoss) : null,
     unrealisedPnl: Number(p.unrealisedPnl ?? 0),
     positionStatus: String(p.positionStatus ?? ''),
-  }));
+  })).filter((p) => p.symbol && p.size > 0); // size "0" — позиция закрыта, Bybit её всё равно шлёт
 }
 
 export interface SetLeverageArgs {
@@ -385,7 +403,7 @@ export async function fetchActiveOrders(cred: ApiCredentials, category: Category
     stopLoss: o.stopLoss ? Number(o.stopLoss) : null,
     takeProfit: o.takeProfit ? Number(o.takeProfit) : null,
     timeInForce: o.timeInForce ? String(o.timeInForce) : undefined,
-  })).filter((o) => o.orderStatus.toUpperCase() !== 'CANCELED' && o.orderStatus.toUpperCase() !== 'REJECTED');
+  })).filter((o) => o.orderStatus.toLowerCase() !== 'cancelled' && o.orderStatus.toLowerCase() !== 'canceled' && o.orderStatus.toLowerCase() !== 'rejected'); // Bybit пишет «Cancelled» с двумя l
 }
 
 export async function cancelOrder(cred: ApiCredentials, category: Category, orderId: string): Promise<void> {

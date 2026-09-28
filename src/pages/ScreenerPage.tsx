@@ -1,5 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
+import { recordSignalSnapshot } from '../lib/signalLog';
+import MarketOverview from '../components/MarketOverview';
 import {
   CATEGORIES,
   INTERVALS,
@@ -15,6 +18,8 @@ import { useSessionState } from '../hooks/useSessionState';
 import { useTradingMode } from '../hooks/useTradingMode';
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
 import { entryBlockReason, makePaperPosition } from '../lib/paper';
+import { describeRefresh, effectiveCycleMs, perCycleFor } from '../lib/klinePlan';
+import { hiddenReasonsCount, splitSuspicious, SUSPICIOUS } from '../lib/pairFilter';
 import { liveHref } from '../lib/tradeMode';
 import { numCls, rowKeyProps, setupCls, setupText } from '../lib/ui';
 import { CAT_GLOSS, CONF_OPTIONS, REFRESH_OPTIONS } from '../lib/options';
@@ -40,9 +45,11 @@ const isRefresh = (v: unknown): v is number =>
 const isConf = (v: unknown): v is number =>
   typeof v === 'number' && [0, 50, 60, 70, 80, 90].includes(v);
 const isPositiveNumber = (v: unknown): v is number => typeof v === 'number' && v > 0;
+const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
 
 export default function ScreenerPage() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const { positions, add } = usePaperPositions();
   const [mode] = useTradingMode();
   const real = mode === 'real';
@@ -60,11 +67,23 @@ export default function ScreenerPage() {
   const [riskPct] = useSessionState<number>('symbol:riskPct', 1, isPositiveNumber);
   const [stake] = useSessionState<number>('paper:stake', 100, isPositiveNumber);
   const [lev] = useSessionState<number>('paper:leverage', 3, isPositiveNumber);
+  // Отсев сомнительных пар (мало ликвидности / вялый ход / не влезает по марже). По умолчанию включён.
+  const [safePairs, setSafePairs] = useSessionState<boolean>('screener:safePairs', true, isBool);
+
+  const riskMoney = deposit * (riskPct / 100);
+  const suspicionOpts = useMemo(
+    () => ({ riskMoney, leverage: lev, stake }),
+    [riskMoney, lev, stake],
+  );
 
   const refreshMs = refreshSec === 0 ? false : refreshSec * 1000;
   const tickers = useTickers(category, refreshMs);
 
-  const symbols = useMemo(() => {
+  const tmap = useMemo(
+    () => new Map((tickers.data ?? []).map((t) => [t.symbol, t])),
+    [tickers.data],
+  );
+  const scanned = useMemo(() => {
     const list = tickers.data ?? [];
     const q = search.trim().toUpperCase();
     const filtered = q ? list.filter((t) => t.symbol.includes(q)) : list;
@@ -74,16 +93,43 @@ export default function ScreenerPage() {
       .map((t) => t.symbol);
   }, [tickers.data, search, maxSymbols]);
 
-  const klines = useKlines(category, symbols, interval, 200, (tickers.data?.length ?? 0) > 0, refreshMs);
-
-  const rows = useMemo(
-    () => buildRows(symbols, tickers.data ?? [], klines, category, interval),
-    [symbols, tickers.data, klines, category, interval],
+  // Пред-фильтр по обороту: тонкие пары отсекаем ДО загрузки свечей.
+  // Это экономит запросы — при 200 монетах минус половина выборки ещё до kline.
+  const tradable = useMemo(
+    () => (safePairs ? scanned.filter((s) => (tmap.get(s)?.turnover24h ?? 0) >= SUSPICIOUS.minTurnover) : scanned),
+    [scanned, tmap, safePairs],
   );
-  const sorted = useMemo(() => sortRows(rows, sortKey, sortDir), [rows, sortKey, sortDir]);
+
+  // Свечи: цикл привязан к таймфрейму, за цикл обновляется часть выборки.
+  const cycleMs = effectiveCycleMs(interval, refreshMs) || 75_000;
+  const klineBudget = perCycleFor(tradable.length, cycleMs);
+  const klines = useKlines(category, tradable, interval, 200, {
+    enabled: (tickers.data?.length ?? 0) > 0,
+    refreshMs,
+    perCycle: klineBudget,
+  });
+
+  const allRows = useMemo(
+    () => buildRows(tradable, tickers.data ?? [], klines, category, interval),
+    [tradable, tickers.data, klines, category, interval],
+  );
+  // Отсев сомнительных пар: смотрим на всю просканированную выборку, а не на отфильтрованную таблицу.
+  const { kept, hidden } = useMemo(
+    () => (safePairs ? splitSuspicious(allRows, suspicionOpts) : { kept: allRows, hidden: [] }),
+    [allRows, safePairs, suspicionOpts],
+  );
+  const hiddenCounts = useMemo(() => hiddenReasonsCount(hidden), [hidden]);
+  const sorted = useMemo(() => sortRows(kept, sortKey, sortDir), [kept, sortKey, sortDir]);
   // Фильтр по уверенности: только направленные сетапы с уверенностью не ниже порога
   const visible = useMemo(() => filterByConfidence(sorted, minConf), [sorted, minConf]);
-  const setupCount = rows.filter((r) => r.direction === 'long' || r.direction === 'short').length;
+  const setupCount = kept.filter((r) => r.direction === 'long' || r.direction === 'short').length;
+  const openByDirection = useMemo(
+    () => ({
+      long: positions.filter((p) => p.status === 'open' && p.direction === 'long').length,
+      short: positions.filter((p) => p.status === 'open' && p.direction === 'short').length,
+    }),
+    [positions],
+  );
 
   const toggleSort = (k: SortKey) => {
     if (k === sortKey) setSortDir((d) => (d === 1 ? -1 : 1));
@@ -127,8 +173,38 @@ export default function ScreenerPage() {
   };
 
   const klineLoading = klines.some((k) => k.loading);
+  const klineRefreshing = klines.some((k) => k.fetching);
   const klineErrors = klines.filter((k) => k.error).length;
   const refreshLabel = REFRESH_OPTIONS.find((o) => o.value === refreshSec)?.label ?? '';
+
+  // Журнал сигналов: снимок сетапов при каждом завершённом прогоне (тикеры
+  // обновились, свечи не грузятся). Запись идемпотентна — дубли кадра гасит
+  // сам recordSignalSnapshot. Deopt: только при реальном обновлении данных.
+  useEffect(() => {
+    if (tickers.dataUpdatedAt === 0 || klineLoading) return;
+    recordSignalSnapshot(kept, category, interval, tickers.dataUpdatedAt);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tickers.dataUpdatedAt, category, interval, klineLoading, kept]);
+
+  /**
+   * Ручное «Обновить»: тикеры сразу + свечи всей текущей выборки (через FIFO-очередь),
+   * без ожидания циклического бюджета. Иначе в таблице остаются сетапы, посчитанные
+   * по старым свечам, — «протухшие». Свечи без данных на этот прогон не заказываем:
+   * рефетчим только то, что уже есть в кэше запросов.
+   */
+  const refreshAll = () => {
+    void tickers.refetch();
+    if (tradable.length === 0) return;
+    void qc.refetchQueries({
+      predicate: (q) =>
+        q.queryKey[0] === 'kline'
+        && q.queryKey[1] === category
+        && q.queryKey[3] === interval
+        && q.queryKey[4] === 200
+        && typeof q.queryKey[2] === 'string'
+        && tradable.includes(q.queryKey[2]),
+    });
+  };
 
   return (
     <div className="page">
@@ -137,9 +213,19 @@ export default function ScreenerPage() {
           <h1>Скринер Bybit</h1>
           <p className="sub">Публичные данные Bybit V5 · ранжирование монет по волатильности и тренду</p>
         </div>
-        <button className="btn" onClick={() => tickers.refetch()} disabled={tickers.isFetching}>
-          {tickers.isFetching ? 'Обновление…' : 'Обновить'}
-        </button>
+        <div className="top-actions">
+          <MarketOverview
+            rows={kept}
+            category={category}
+            interval={interval}
+            openByDirection={openByDirection}
+            hidden={hidden}
+            loading={klineLoading}
+          />
+          <button className="btn" onClick={refreshAll} disabled={tickers.isFetching || klineRefreshing}>
+            {tickers.isFetching || klineRefreshing ? 'Обновление…' : 'Обновить'}
+          </button>
+        </div>
       </header>
 
       <div className="controls">
@@ -165,6 +251,15 @@ export default function ScreenerPage() {
             {CONF_OPTIONS.map((o) => <option key={o.label} value={o.value}>{o.label}</option>)}
           </select>
         </label>
+        <label className="check">
+          <input
+            type="checkbox"
+            name="safePairs"
+            checked={safePairs}
+            onChange={(e) => setSafePairs(e.target.checked)}
+          />
+          Отсеивать сомнительные<Term t="safePairs" />
+        </label>
         <input className="search" name="search" placeholder="Поиск: BTC…" value={search} onChange={(e) => setSearch(e.target.value)} />
         <label>Автообновление
           <select name="refresh" value={refreshSec} onChange={(e) => setRefreshSec(Number(e.target.value))}>
@@ -179,8 +274,17 @@ export default function ScreenerPage() {
         <p className="state">
           Режим: <b className={real ? 'neg' : ''}>{real ? 'реальный' : 'бумажный'}</b>
           {' · '}{real ? 'вход ведёт на форму ордера /live' : 'вход виртуальный, деньги не двигаются'}
-          {' · '}Монет: {tickers.data?.length ?? 0} · В анализе: {symbols.length} · Сетапов: {setupCount} · Свечи {INTERVAL_LABELS[interval]} ×200
+          {' · '}Монет: {tickers.data?.length ?? 0} · Сканируем: {scanned.length} · В анализе: {kept.length} · Сетапов: {setupCount} · Свечи {INTERVAL_LABELS[interval]} ×200
           {minConf > 0 ? ` · Фильтр: уверенность от ${minConf}%` : ''}
+          {safePairs
+            ? ` · Сомнительные отсеяны: ${scanned.length - kept.length}`
+              + ` (без свечей ${scanned.length - tradable.length} · по свечам ${hidden.length}`
+              + (hidden.length > 0
+                ? `: вялый ход ${hiddenCounts.volatility}, маржа ${hiddenCounts.size}`
+                : '')
+              + ')'
+            : ' · Сомнительные не отсеиваются'}
+          {tradable.length > 0 && ` · Обновление свечей: ${describeRefresh(tradable.length, klineBudget, cycleMs)}`}
           {` · Автообновление: ${refreshSec === 0 ? 'выкл' : `каждые ${refreshLabel}`}`}
           {tickers.dataUpdatedAt > 0 ? ` · Обновлено: ${new Date(tickers.dataUpdatedAt).toLocaleTimeString()}` : ''}
           {klineLoading ? ' · подгрузка свечей…' : ''}{klineErrors > 0 ? ` · ошибок свечей: ${klineErrors}` : ''}

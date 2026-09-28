@@ -11,26 +11,29 @@ import {
 import {
   cancelOrder,
   clearCredentials,
-  fetchActiveOrders,
-  fetchWalletBalance,
   loadCredentials,
   type ApiCredentials,
 } from '../api/privateApi';
-import { closeReal, fetchLivePositions, getInstrument, moveStopToBreakeven, openReal, planLadder } from '../api/live';
+import { closeAllReal, closeReal, getInstrument, moveStopToBreakeven, openReal, planLadder } from '../api/live';
 import { computeMetrics } from '../lib/metrics';
 import { buildTradePlan, type TradePlan } from '../lib/tradePlan';
 import { useSessionState } from '../hooks/useSessionState';
+import { useApiAccount } from '../hooks/useApiAccount';
 import { parseLiveLink } from '../lib/tradeMode';
 import { fmt, fmtCompact } from '../lib/format';
 import { setupCls, setupText } from '../lib/ui';
 import Term from '../components/Term';
 import EnvBadge from '../components/EnvBadge';
+import WsBadge from '../components/WsBadge';
 
 const isPositiveNumber = (v: unknown): v is number => typeof v === 'number' && v > 0;
 
 /** Реальная торговля через API Bybit (сеть — та, что в сохранённых ключах). */
 export default function LivePage() {
-  const [cred] = useState<ApiCredentials | null>(() => loadCredentials());
+  const [stored] = useState<ApiCredentials | null>(() => loadCredentials());
+  // Ключи могут смениться на /api, пока страница открыта — берём актуальные из хука счёта.
+  const api = useApiAccount();
+  const cred = api.cred ?? stored;
   // Предзаполнение из ссылки «Реальный вход →» в скринере/плане: /live?symbol=…&interval=…
   const [link] = useSearchParams();
   const fromLink = useMemo(() => parseLiveLink(`?${link.toString()}`), [link]);
@@ -52,24 +55,12 @@ export default function LivePage() {
   const testnet = !!cred?.testnet;
   const sym = symbol.trim().toUpperCase();
 
-  const balanceQ = useQuery({
-    queryKey: ['live', 'wallet', testnet],
-    queryFn: () => fetchWalletBalance(cred!),
-    enabled: !!cred,
-    refetchInterval: 12_000,
-  });
-  const positionsQ = useQuery({
-    queryKey: ['live', 'positions', testnet],
-    queryFn: () => fetchLivePositions(cred!),
-    enabled: !!cred,
-    refetchInterval: 12_000,
-  });
-  const ordersQ = useQuery({
-    queryKey: ['live', 'orders', testnet],
-    queryFn: () => fetchActiveOrders(cred!),
-    enabled: !!cred,
-    refetchInterval: 12_000,
-  });
+  // Портфель, ордера и баланс — из общего снимка счёта: он живой (приватный WebSocket),
+  // поэтому вместо трёх запросов каждые 12 с идут события по мере сделок.
+  const account = api.account;
+  const balanceQ = { isError: api.state === 'error', error: api.error, data: account?.wallet ?? null };
+  const positionsQ = { isError: api.state === 'error', error: api.error };
+  const ordersQ = { isError: api.state === 'error', error: api.error };
   const planQ = useQuery({
     queryKey: ['live', 'plan', sym, interval],
     queryFn: async () => {
@@ -95,9 +86,7 @@ export default function LivePage() {
   });
 
   const reload = () => {
-    void balanceQ.refetch();
-    void positionsQ.refetch();
-    void ordersQ.refetch();
+    void api.reload();
   };
 
   const doOpen = async () => {
@@ -121,6 +110,31 @@ export default function LivePage() {
     try {
       await closeReal(cred, { category: 'linear', symbol: s, direction });
       setNotice(`${s}: закрыт по рынку`);
+      reload();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doCloseAll = async () => {
+    if (!cred || !canTrade || positions.length === 0) return;
+    if (!window.confirm(
+      `Закрыть все позиции (${positions.length}) по рынку?\n\nДействие отправляет настоящие ордера на ${testnet ? 'тестнет' : 'мейннет'} Bybit.`,
+    )) return;
+    setBusy(true); setActionError(null); setNotice(null);
+    try {
+      const list = positions.map((p) => ({
+        symbol: p.symbol,
+        direction: p.side === 'Buy' ? 'long' as const : 'short' as const,
+        positionIdx: p.positionIdx,
+      }));
+      const res = await closeAllReal(cred, list);
+      const failed = res.failed.length > 0
+        ? ` · не закрыты: ${res.failed.map((f) => `${f.symbol} (${f.error.slice(0, 60)})`).join(', ')}`
+        : '';
+      setNotice(`${testnet ? 'Тестнет: ' : ''}закрыто ${res.ok} из ${list.length} позиций${failed}`);
       reload();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
@@ -172,8 +186,8 @@ export default function LivePage() {
   const minDepositPct = ladder && deposit > 0 && ladder.minRisk > 0
     ? (ladder.minRisk / deposit) * 100
     : null;
-  const positions = positionsQ.data ?? [];
-  const orders = ordersQ.data ?? [];
+  const positions = account?.positions ?? [];
+  const orders = account?.orders ?? [];
   const unreal = positions.reduce((a, p) => a + p.unrealisedPnl, 0);
 
   return (
@@ -192,6 +206,7 @@ export default function LivePage() {
             {balanceQ.data ? `${fmtCompact(balanceQ.data.totalEquity)} $` : '…'} · свободно{' '}
             {balanceQ.data ? `${fmtCompact(balanceQ.data.totalAvailableBalance)} $` : '…'} · позиций {positions.length}
             {positions.length > 0 ? ` · uP&L ${fmt(unreal)} $` : ''}
+            {' '}<WsBadge state={api.ws} testnet={testnet} />
           </p>
         </div>
         <div className="controls">
@@ -256,7 +271,19 @@ export default function LivePage() {
           <h3><Term t="position" label="Позиции (linear)" /></h3>
           {positionsQ.isError && <p className="state err">Не удалось загрузить позиции: {String(positionsQ.error)}</p>}
           {positions.length === 0 ? <p className="state">Нет открытых позиций.</p> : (
-            <table>
+            <>
+            {canTrade && (
+              <div className="table-actions">
+                {/* TODO(crash): «Закрыть все» на /live роняет вкладку после confirm
+                    (подозрение: бесконечный ре-рендер при опустошении портфеля/сокетов),
+                    затем вернуть в работу и добавить e2e-проверку. Временно disabled. */}
+                <button className="btn btn-sm btn-close-all" disabled onClick={doCloseAll} title="Временно отключено: закрытие всех роняет страницу — идёт разбор причины">
+                  {busy ? 'Закрываем…' : 'Закрыть все'}
+                </button>
+              </div>
+            )}
+            <div className="table-wrap">
+              <table>
               <tbody>
                 {positions.map((p) => {
                   const dir: 'long' | 'short' = p.side === 'Buy' ? 'long' : 'short';
@@ -276,6 +303,8 @@ export default function LivePage() {
                 })}
               </tbody>
             </table>
+            </div>
+            </>
           )}
         </div>
       </section>
@@ -305,10 +334,38 @@ export default function LivePage() {
         )}
       </section>
 
+      <section className="detail">
+        <h3>Свежие исполнения {api.ws === 'live' ? '' : '(пока поток не подключён — пусто)'}</h3>
+        {account?.fills.length ? (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Время</th><th>Символ</th><th>Сторона</th><th>Цена</th><th>Qty</th><th>Комиссия</th><th>P&L</th></tr></thead>
+              <tbody>
+                {account.fills.map((f) => (
+                  <tr key={f.execId}>
+                    <td className="muted">{new Date(f.execTime).toLocaleTimeString('ru-RU')}</td>
+                    <td className="sym">{f.symbol}</td>
+                    <td className={f.side === 'Buy' ? 'pos' : 'neg'}>{f.side === 'Buy' ? 'ПОКУПКА' : 'ПРОДАЖА'}</td>
+                    <td>{fmt(f.execPrice, f.execPrice < 1 ? 5 : 4)}</td>
+                    <td>{fmt(f.execQty, 4)}</td>
+                    <td className="muted">{fmt(f.execFee, 4)}</td>
+                    <td className={f.execPnl > 0 ? 'pos' : f.execPnl < 0 ? 'neg' : 'muted'}>{fmt(f.execPnl, 4)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="state">
+            Исполнений ещё не было{api.ws === 'live' ? '.' : ': лента появится, как только приватный сокет подключится и биржа пришлёт первые сделки.'}
+          </p>
+        )}
+      </section>
+
       <footer className="foot">
         Реальная торговля использует те же правила, что бумажная: рисковая дозировка, лимитный вход по середине
         зоны со стопом, лесенка 70/20/10 (reduce-only лимитки) и перенос стопа в безубыток после TP1.
-        Движок работает, пока вкладка открыта.
+        Движок работает, пока вкладка открыта.{' '}<WsBadge state={api.ws} testnet={testnet} />
       </footer>
     </div>
   );

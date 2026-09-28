@@ -1,8 +1,11 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { ApiAccountView } from '../hooks/useApiAccount';
+import { closeAllReal } from '../api/live';
 import { fmt, fmtCompact } from '../lib/format';
 import { setupCls } from '../lib/ui';
 import Term from './Term';
+import WsBadge from './WsBadge';
 
 /** Цена символа: у дорогих монет копейки, у дешёвых — знаки после запятой. */
 const pxFmt = (v: number) => (v >= 1000 ? fmt(v, 2) : v >= 1 ? fmt(v, 4) : fmt(v, 6));
@@ -28,6 +31,37 @@ interface Props {
  * Торговые действия (закрыть, перенос в безубыток, лесенка) — на /live.
  */
 export default function RealAccountView({ api }: Props) {
+  const [closing, setClosing] = useState(false);
+  const [closeMsg, setCloseMsg] = useState<string | null>(null);
+
+  const doCloseAll = async () => {
+    const cred = api.cred;
+    if (!cred || api.account == null || api.account.positions.length === 0) return;
+    const n = api.account.positions.length;
+    if (!window.confirm(
+      `Закрыть все позиции (${n}) рыночными ордерами?\n\nЭто настоящие ордера на ${api.testnet ? 'тестнет' : 'мейннет'} Bybit.`,
+    )) return;
+    setClosing(true);
+    setCloseMsg(null);
+    try {
+      const list = api.account.positions.map((p) => ({
+        symbol: p.symbol,
+        direction: p.side === 'Buy' ? 'long' as const : 'short' as const,
+        positionIdx: p.positionIdx,
+      }));
+      const res = await closeAllReal(cred, list);
+      const failed = res.failed.length > 0
+        ? ` · не закрыты: ${res.failed.map((f) => `${f.symbol} (${f.error.slice(0, 60)})`).join(', ')}`
+        : '';
+      setCloseMsg(`Закрыто ${res.ok} из ${n} позиций${failed}`);
+      api.reload();
+    } catch (e) {
+      setCloseMsg(`Ошибка закрытия: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setClosing(false);
+    }
+  };
+
   if (api.state === 'checking' || api.state === 'none') {
     return (
       <p className="state">
@@ -89,7 +123,18 @@ export default function RealAccountView({ api }: Props) {
         </div>
       </section>
 
-      <h2>Позиции Bybit</h2>
+      <div className="detail-head">
+        <h2>Позиции Bybit</h2>
+        {/* TODO(crash): «Закрыть все» на /real роняет вкладку после confirm
+            (подозрение: бесконечный ре-рендер при опустошении портфеля/сокетов),
+            затем вернуть в работу и добавить e2e-проверку. Временно disabled. */}
+        {positions.length > 0 && (
+          <button className="btn btn-sm btn-close-all" disabled onClick={() => void doCloseAll()}>
+            {closing ? 'Закрываем…' : 'Закрыть все'}
+          </button>
+        )}
+      </div>
+      {closeMsg && <p className={`state ${closeMsg.includes('Ошибка') || closeMsg.includes('не закрыты') ? 'err' : 'pos'}`}>{closeMsg}</p>}
       {positions.length === 0 ? (
         <p className="state">Позиций нет. Открыть реальную сделку можно на странице <Link to="/live">«Live»</Link>.</p>
       ) : (
@@ -175,7 +220,9 @@ export default function RealAccountView({ api }: Props) {
       )}
 
       <footer className="foot">
-        Данные Bybit V5 ({api.testnet ? 'тестнет' : 'мейннет'}), автообновление раз в 30 с и при возврате на вкладку.
+        Данные Bybit V5 ({api.testnet ? 'тестнет' : 'мейннет'}).{' '}
+        {api.ws === 'live' ? 'Позиции, ордера и исполнения — из живого потока Bybit, REST-опрос остаётся страховкой.' : 'Автообновление раз в 30 с и при возврате на вкладку.'}{' '}
+        <WsBadge state={api.ws} testnet={api.testnet} />{' '}
         Кнопки «Обновить» и торговые действия — на странице <Link to="/live">«Live»</Link>.
         Занятая маржа ({fmtCompact(wallet.totalInitialMargin)} $) — именно эти деньги депозита заблокированы под сделки;
         торговый номинал позиций в разы больше ({fmtCompact(positions.reduce((a, p) => a + p.size * p.markPrice, 0))} $).

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { openReal, planLadder, roundDownToStep, roundToTick, type InstrumentInfo } from '../src/api/live';
+import { closeAllReal, openReal, planLadder, roundDownToStep, roundToTick, type InstrumentInfo } from '../src/api/live';
 import type { TradePlan } from '../src/lib/tradePlan';
 
 const plan = (over: Partial<TradePlan> = {}): TradePlan => ({
@@ -216,5 +216,43 @@ describe('planLadder (пред-полётная проверка лесенки)
     expect(l.qty).toBe(0);
     expect(l.problems.length).toBeGreaterThan(0);
     expect(l.minRisk).toBe(0);
+  });
+});
+
+describe('closeAllReal', () => {
+  it('закрывает каждую позицию: cancel-all + маркет на символ; ошибки не обрывают цикл', async () => {
+    const calls: { path: string; body: string }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      const u = new URL(String(url));
+      calls.push({ path: u.pathname, body: String(init.body ?? '') });
+      if (u.pathname === '/v5/order/create' && calls.filter((c) => c.path === '/v5/order/create').length === 2) {
+        // второй символ биржа отклоняет
+        return { ok: true, text: async () => JSON.stringify({ retCode: 10002, retMsg: 'Rejected', result: {} }) };
+      }
+      return okResult({ orderId: 'x' });
+    }));
+
+    const cred = { key: 'K', secret: 'S', testnet: true };
+    const res = await closeAllReal(cred, [
+      { symbol: 'BTCUSDT', direction: 'long' as const },
+      { symbol: 'ETHUSDT', direction: 'short' as const },
+    ]);
+
+    expect(res.ok).toBe(1);
+    expect(res.failed).toHaveLength(1);
+    expect(res.failed[0].symbol).toBe('ETHUSDT');
+
+    // Для каждого символа: order/cancel-all + order/create (маркет reduceOnly qty=0).
+    expect(calls.filter((c) => c.path === '/v5/order/cancel-all')).toHaveLength(2);
+    const creates = calls.filter((c) => c.path === '/v5/order/create');
+    expect(creates).toHaveLength(2);
+    expect(creates[0].body).toContain('"symbol":"BTCUSDT"');
+    expect(creates[0].body).toContain('"side":"Sell"');
+    expect(creates[0].body).toContain('"orderType":"Market"');
+    expect(creates[0].body).toContain('"qty":"0"');
+    expect(creates[0].body).toContain('"reduceOnly":true');
+    expect(creates[0].body).toContain('"closeOnTrigger":true');
+    expect(creates[1].body).toContain('"symbol":"ETHUSDT"');
+    expect(creates[1].body).toContain('"side":"Buy"');
   });
 });

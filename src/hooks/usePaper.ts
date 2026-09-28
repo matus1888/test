@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { applySettle, canOpenPosition, type DraftKey, type PaperPosition, type SettleInfo } from '../lib/paper';
+import { applySettle, canOpenPosition, closeAllPositions, type DraftKey, type PaperPosition, type SettleInfo } from '../lib/paper';
 
 const KEY = 'paper:positions:v1';
 // Событие для оповещения экземпляров хука в ЭТОЙ вкладке: нативный `storage`-event
@@ -96,6 +96,13 @@ export function usePaperPositions() {
     [update],
   );
 
+  /** Закрыть все открытые позиции по текущим ценам (одна запись в localStorage). */
+  const closeAll = useCallback(
+    (priceOf: (p: PaperPosition) => number) =>
+      update((prev) => closeAllPositions(prev, priceOf)),
+    [update],
+  );
+
   /** Материализация авто-закрытий и частичных выходов. Пишет только если есть изменения. */
   const settle = useCallback(
     (list: { id: string; info: SettleInfo }[]) => {
@@ -110,5 +117,5 @@ export function usePaperPositions() {
     [update],
   );
 
-  return { positions, add, closeManual, settle, remove };
+  return { positions, add, closeManual, closeAll, settle, remove };
 }

@@ -560,6 +560,23 @@ export function canOpenPosition(
   return null;
 }
 
+/**
+ * Закрыть все открытые бумажные позиции «по рынку» (по текущей цене `priceOf`).
+ * Возвращает новый список: у каждой закрытой проставляется manual-закрытие.
+ * Чистая функция — хук применяет её одним update (одна запись localStorage).
+ */
+export function closeAllPositions(
+  positions: PaperPosition[],
+  priceOf: (p: PaperPosition) => number,
+  time = Date.now(),
+): PaperPosition[] {
+  return positions.map((p) =>
+    p.status === 'open'
+      ? { ...p, status: 'closed' as const, closeReason: 'manual' as const, closePrice: priceOf(p), closedAt: time }
+      : p,
+  );
+}
+
 export function fmtTime(ts: number): string {
   return new Date(ts).toLocaleString('ru-RU', {
     day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',

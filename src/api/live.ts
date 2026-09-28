@@ -288,6 +288,34 @@ export async function closeReal(
   });
 }
 
+export interface CloseAllResult {
+  ok: number;
+  failed: { symbol: string; error: string }[];
+}
+
+/**
+ * Закрыть все переданные позиции по рынку. Закрытие не прерывается первой
+ * ошибкой: каждая позиция пытается закрыться, неудачи собираются в `failed`
+ * (символ показан, чтобы страница могла назвать конкретного виновника).
+ */
+export async function closeAllReal(
+  cred: ApiCredentials,
+  positions: { symbol: string; direction: 'long' | 'short'; positionIdx?: number }[],
+  category: Category = 'linear',
+): Promise<CloseAllResult> {
+  const ok: string[] = [];
+  const failed: { symbol: string; error: string }[] = [];
+  for (const p of positions) {
+    try {
+      await closeReal(cred, { category, symbol: p.symbol, direction: p.direction, positionIdx: p.positionIdx });
+      ok.push(p.symbol);
+    } catch (e) {
+      failed.push({ symbol: p.symbol, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  return { ok: ok.length, failed };
+}
+
 /** Перенести стоп позиции в безубыток (после TP1). */
 export async function moveStopToBreakeven(
   cred: ApiCredentials,

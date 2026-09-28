@@ -3,6 +3,7 @@ import {
   applySettle,
   bookedPnl,
   canOpenPosition,
+  closeAllPositions,
   closeLabel,
   entryBlockReason,
   evaluatePosition,
@@ -685,5 +686,25 @@ describe('entryBlockReason / makePaperPosition (быстрый вход из т�
     expect(entryBlockReason(fill, draft, plan(), fiveHundred)).toMatch(/капитал/i);
     // пустой портфель — разрешено
     expect(entryBlockReason([], draft, plan(), fiveHundred)).toBeNull();
+  });
+});
+
+describe('closeAllPositions', () => {
+  const p = (over: Partial<Parameters<typeof pos>[0]> = {}): ReturnType<typeof pos> => pos(over);
+
+  it('закрывает все открытые по цене функции, закрытые не трогает', () => {
+    const open1 = p({ id: 'o1', symbol: 'AAAUSDT' });
+    const open2 = p({ id: 'o2', symbol: 'BBBUSDT' });
+    const closed = p({ id: 'c1', symbol: 'CCCUSDT', status: 'closed' as const, closePrice: 100, closedAt: 1 });
+    const next = closeAllPositions([open1, open2, closed], (x) => x.entryPrice + 10, 12345);
+    expect(next.filter((x) => x.status === 'open')).toHaveLength(0);
+    expect(next[0]).toMatchObject({ status: 'closed', closeReason: 'manual', closePrice: open1.entryPrice + 10, closedAt: 12345 });
+    expect(next[2]).toBe(closed); // закрытая не меняется
+  });
+
+  it('пустой/без открытых — без изменений или пустой список', () => {
+    expect(closeAllPositions([], () => 1)).toEqual([]);
+    const onlyClosed = p({ id: 'c', symbol: 'CUSDT', status: 'closed' as const });
+    expect(closeAllPositions([onlyClosed], () => 1)).toEqual([onlyClosed]);
   });
 });

@@ -8,10 +8,13 @@ import {
   type ApiCredentials,
 } from '../api/privateApi';
 import { useApiAccount } from '../hooks/useApiAccount';
+import { useSessionState } from '../hooks/useSessionState';
 import { fmt, fmtCompact } from '../lib/format';
 import Term from '../components/Term';
 
 const MAX_COINS = 8;
+
+const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
 
 /** Страница подключения к реальному API Bybit (ключ/секрет хранятся в браузере). */
 export default function ApiPage() {
@@ -23,12 +26,15 @@ export default function ApiPage() {
   const [secret, setSecret] = useState(() => dev?.secret ?? '');
   const [testnet, setTestnet] = useState(() => dev?.testnet ?? false);
   const [formError, setFormError] = useState<string | null>(null);
+  // «Не сохранять ключ» — только в память вкладки (сессия). Дефолт из sessionStorage.
+  const [sessionOnly, setSessionOnly] = useSessionState<boolean>('api:sessionKeys', false, isBool);
 
   const cred = api.cred;
   const info = api.account;
   const busy = api.isFetching;
   const error = formError ?? (cred && !info ? api.error : null);
   const fromEnv = dev != null && !hasStoredCredentials();
+  const sessionActive = cred && sessionOnly;
 
   const saveAndCheck = () => {
     const k = key.trim();
@@ -40,7 +46,7 @@ export default function ApiPage() {
     setFormError(null);
     // Ключи из .env не сохраняем без явного действия пользователя.
     if (dev == null || k !== dev.key || s !== dev.secret || testnet !== dev.testnet) {
-      saveCredentials({ key: k, secret: s, testnet });
+      saveCredentials({ key: k, secret: s, testnet }, !sessionOnly);
     }
     api.reload();
   };
@@ -71,11 +77,13 @@ export default function ApiPage() {
           <div className="lvl">
             <span>Ключ</span>
             <b>
-              {cred
-                ? fromEnv
-                  ? `${cred.testnet ? 'Тестнет' : 'Мейннет'} · из .env${info ? ' · проверен' : ''}`
-                  : cred.testnet ? 'Тестнет · настроен' : 'Мейннет · настроен'
-                : 'Не настроен'}
+              {sessionActive
+                ? `${cred.testnet ? 'Тестнет' : 'Мейннет'} · сессия вкладки`
+                : cred
+                  ? fromEnv
+                    ? `${cred.testnet ? 'Тестнет' : 'Мейннет'} · из .env${info ? ' · проверен' : ''}`
+                    : cred.testnet ? 'Тестнет · настроен' : 'Мейннет · настроен'
+                  : 'Не настроен'}
             </b>
           </div>
           {cred && (
@@ -99,6 +107,15 @@ export default function ApiPage() {
                 <option value={0}>Мейннет (реальные деньги)</option>
                 <option value={1}>Тестнет (api-testnet.bybit.com)</option>
               </select>
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                name="sessionOnly"
+                checked={sessionOnly}
+                onChange={(e) => setSessionOnly(e.target.checked)}
+              />
+              Не сохранять ключ (только на эту вкладку)<Term t="sessionKeys" />
             </label>
             <div className="controls">
               <button className="btn" onClick={saveAndCheck} disabled={busy}>

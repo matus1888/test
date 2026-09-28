@@ -13,6 +13,7 @@ import {
   type Interval,
 } from '../api/bybit';
 import { computeMetrics } from '../lib/metrics';
+import { effectiveCycleMs } from '../lib/klinePlan';
 import { fmt, fmtCompact, fmtPct } from '../lib/format';
 import { setupCls, setupText, rowKeyProps } from '../lib/ui';
 import { buildTradePlan, htfRisk } from '../lib/tradePlan';
@@ -60,6 +61,9 @@ export default function SymbolPage() {
     setSearchParams({ interval: v }, { replace: true });
   };
 
+  // Свеча меняется на закрытии интервала: чаще полминуты на 5 мин данные не изменятся.
+  const cycleMs = effectiveCycleMs(interval, 60_000) || 60_000;
+
   const tickers = useQuery({
     queryKey: ['tickers', category],
     queryFn: () => fetchTickers(category),
@@ -70,8 +74,9 @@ export default function SymbolPage() {
     queryKey: ['kline', category, symbol, interval, 200],
     queryFn: () => fetchKlines(category, symbol, interval, 200),
     enabled: symbol.length > 0,
-    staleTime: 30_000,
-    refetchInterval: 60_000,
+    staleTime: cycleMs,
+    refetchInterval: cycleMs,
+    refetchOnWindowFocus: false,
   });
 
   const ticker = (tickers.data ?? []).find((t) => t.symbol === symbol);
@@ -84,13 +89,17 @@ export default function SymbolPage() {
     [klines.data, metrics, category, ticker, interval],
   );
 
-  // Свечи сразу по всем таймфреймам для таблицы раскладов
+  // Свечи сразу по всем таймфреймам для таблицы раскладов.
+  // Это 13 запросов один раз на страницу — раскладки отражают состояние на входе,
+  // поэтому автообновления и рефетча по фокусу здесь нет.
   const tfKlines = useQueries({
     queries: INTERVALS.map((iv) => ({
       queryKey: ['kline', category, symbol, iv, 200],
       queryFn: () => fetchKlines(category, symbol, iv, 200),
       enabled: symbol.length > 0,
-      staleTime: 60_000,
+      staleTime: 10 * 60_000,
+      refetchOnWindowFocus: false,
+      refetchOnMount: false,
       retry: 1,
     })),
   });

@@ -24,6 +24,20 @@ bun run preview     # предпросмотр сборки
 bun scripts/backtest.mjs  # walk-forward бэктест стратегии по истории (5m)
 ```
 
+Бэктест — исследовательский стенд (не «скрипт ради цифр»):
+```sh
+bun scripts/backtest.mjs                               # универсум из scripts/universe.json (фиксирован для сравнимых прогонов)
+bun scripts/backtest.mjs --symbols BTCUSDT,ETHUSDT     # точечный прогон
+bun scripts/backtest.mjs --interval 15 --conf 0        # другой ТФ / без порога уверенности
+bun scripts/backtest.mjs --no-funding --slippage-bps 2 # отключить фандинг / другой слип
+```
+Особенности: вход засчитывается только если зона реально задета (лимит, ≤3 баров); паритет с
+приложением — порог уверенности `--conf` (дефолт 80, как скринер) и отсев тонких/вялых пар;
+издержки — тейкер-комиссия, слип 1 б.п./сторона, фандинг по истории; отчёт по четвертям истории
+(живёт ли эффект, а не одна удачная неделя); кэш свечей/фандинга в `scripts/.cache/`; отчёт также
+пишется в `scripts/backtest-report.json` для диффа между прогонами. Мёртвые/делистнутые пары в
+`universe.json` остаются в выборке (фиксируем при первом прогоне), что убирает survivorship bias.
+
 ⚠️ Тесты запускаются именно через `bun run test` (это `vitest run`). Голая команда `bun test`
 запускает встроенный runner Bun, под которым vitest-овый `vi` не работает
 (`vi.stubGlobal is not a function`) — bybit.test.ts падает.
@@ -53,17 +67,32 @@ bun run dev            # ключи подставляются автомати�
 src/
   api/bybit.ts            # Bybit V5: категории, таймфреймы, fetchTickers/fetchKlines,
                           #   FIFO-очередь kline (≤10 одновременно), CORS-fallback только в dev, bybitTradeUrl
-  api/privateApi.ts       # приватный API: креды в localStorage → .env, HMAC-SHA256 подпись, requestPrivate,
-                          #   wallet (с маржой и uP&L)/positions/leverage/placeOrder/cancelOrder/cancelAll,
+  api/privateApi.ts       # приватный API: креды в localStorage → .env → сессия вкладки (persist=false),
+                          #   HMAC-SHA256 подпись, requestPrivate, wallet, positions, leverage, placeOrder,
                           #   позиционный TP/SL, scopeParams (symbol | settleCoin | baseCoin), CREDENTIALS_EVENT
   api/live.ts             # реальный движок: getInstrument (tick/qtyStep/minOrderQty/minNotional), округление,
                           #   planLadder (пред-полётная проверка размера и срезов лесенки),
                           #   openReal (плечо→вход+SL→лесенка TP1/TP2/TP3, откат при отказе TP),
                           #   closeReal, moveStopToBreakeven
+  api/ws.ts               # WebSocket Bybit V5: WsConnection (подписки по refcount, auth приватного канала,
+                          #   ping 20 с, бэк-офф реконнекта, рамки budgets), singletons publicWs/privateWs,
+                          #   buildWsAuth (HMAC GET/realtime{expires}); тестируется заглушкой сокета
+  lib/accountStream.ts    # разбор и слияние приватных кадров: parseWsPosition/parseWsOrder/parseWsExecution,
+                          #   mergePositions (uP&L-дельта для кошелька), mergeOrders (терминальные статусы),
+                          #   mergeWallet (uP&L восстанавливается из балансов), pushFill (лента исполнений)
   lib/metrics.ts          # метрики свечей: волатильность, тренд (slope/R²), RSI, streak
   lib/tradePlan.ts        # движок плана: EMA20/50, ATR(14), Donchian-20 → направление/уровни;
                           #   фильтры качества MIN_TREND_R2/MIN_VOLUME_RATIO/MAX_ATR_PCT; confidence (0..96)
   lib/screener.ts         # модель таблицы: Row, buildRows, priorityOf (приоритет входа), sortRows, filterByConfidence, COLUMNS
+  lib/pairFilter.ts       # «сомнительная пара»: SUSPICIOUS (ликвидность/вялость/размер), marginFor, suspicionsOf,
+                          #   splitSuspicious, hiddenReasonsCount — отсев лишнего из выборки скринера
+  lib/marketRegime.ts     # сводка рынка и вердикт: summarizeRegime, VERDICT_LABEL, REGIME_THRESHOLDS,
+                          #   перекос в шорты, корректировка по медианному ATR
+  lib/klinePlan.ts        # бюджет свечных запросов: INTERVAL_MS, msToNextCandle, effectiveCycleMs, REFRESH_BUDGET,
+                          #   perCycleFor, planRefresh (горячие + круговая очередь), sweepCycles, describeRefresh, candleKey
+  lib/tickerStore.ts      # живые цены из публичного сокета: стор на вкладку, parseTicker, putTicker,
+                          #   useWsPrices/useWsTickers (useSyncExternalStore), сброс раз в 400 мс,
+                          #   usePublicWsLive (метка «поток live»), FLUSH_MS
   lib/paper.ts            # бумажные позиции: evaluatePosition/settleOpen (+ событие ликвидации), pnlOf/totalPnlOf
                           #   (r, % к ставке и к марже, номинал/маржа), feeOf, liquidationPrice, liqToStopRatio/maxSafeLeverage/LIQ_SAFETY,
                           #   entryBlockReason/makePaperPosition (общий вход), totalEngagedMargin (портфельный лимит)
@@ -74,12 +103,17 @@ src/
   lib/guide.ts            # контент шагов walkthrough + флаг guide:seen:v1 (shouldAutoOpen/markSeen)
   lib/tradeMode.ts        # режим торговли: 'paper' | 'real', parseMode, isRealContext/effectiveMode,
                           #   liveHref/parseLiveLink (переход в реальный вход), тексты подсказок
+  lib/paperStats.ts       # аналитика по закрытым: closedStats (срезы по направлению/уверенности/ATR/ТФ/исходу),
+                          #   closedSummary, кривая доходности по времени закрытия, бакеты confidence/ATR
+  lib/signalLog.ts        # журнал сигналов: recordSignalSnapshot (снимок сетапов при прогоне скринера,
+                          #   дедуп одинаковых кадров за минуту, TTL 14 дней), loadSignalLog, clearSignalLog
   hooks/usePaper.ts       # позиции в localStorage (add с проверкой дублей/лимитов, closeManual/settle/remove,
                           #   sync между вкладками и компонентами одной вкладки)
-  hooks/useApiAccount.ts  # снимок реального счёта: кошелёк + позиции + активные ордера одним useQuery;
-                          #   ключи перечитываются по CREDENTIALS_EVENT, stale 15 с / рефетч 30 с / при фокусе
-  hooks/useLivePrices.ts  # живые цены тикеров батчами по категориям
-  hooks/useMarket.ts      # useTickers + useKlines (батч kline через useQueries)
+  hooks/useApiAccount.ts  # снимок реального счёта одним useQuery; приватный WS (position/order/execution/wallet)
+                          #   правит кэш событиями, REST — страховка и сверка после реконнекта; поле ws
+  hooks/useLivePrices.ts  # живые цены тикеров: WebSocket (100 мс) + REST-страховка (60 с); groupByCategory
+  hooks/useMarket.ts      # useTickers + useKlines (батч kline через useQueries) + useCycle;
+                          #   useKlines обновляет срез символов по тику цикла (klinePlan), без рефетча по фокусу
   hooks/useSessionState.ts# useState с персистом значений в sessionStorage
   hooks/useTradingMode.ts# режим торговли вкладки: sessionStorage + MODE_EVENT (все кнопки входа реагируют сразу)
   components/Term.tsx     # иконка-термин с кастомным тултипом (fixed, z-index 9999, без title)
@@ -96,8 +130,16 @@ src/
   components/TradeModeBar.tsx # полоса под шапкой: всегда отвечает «бумага или реальные деньги» + сеть/ключи
   components/EnvBadge.tsx    # метка окружения на страницах: БУМАГА (синяя) / РЕАЛЬНЫЕ ДЕНЬГИ (красная)
   components/Walkthrough.tsx  # модальный обзор по шагам; авто-показ при первом визите, «?» в хедере — повторно
+  components/WsBadge.tsx   # метка живого потока: точка + «поток live»/«сокет: подключение»/«сокет: переподключение…»,
+                           #   сеть (тестнет); без нативного title
+  components/MarketOverview.tsx # кнопка «Обзор рынка» + модалка: вердикт, 4 карточки метрик, топ лонгов/шортов,
+                             #   причины и действия (Esc/backdrop, класс .mo-* в index.css)
+  components/PaperAnalytics.tsx # «Аналитика по закрытым» на /paper: срезы (направление/уверенность/ATR/ТФ/исход)
+                              #   + кривая доходности SVG; чистые расчёты в lib/paperStats.ts
   pages/ScreenerPage.tsx  # таблица-ранжирование, фильтры, кнопка входа в строке сетапа: «Вход (бумага)»
-                          #   в бумажном режиме, «Реальный вход →» на /live в реальном; строка «Режим: …»
+                          #   в бумажном режиме, «Реальный вход →» на /live в реальном; строка «Режим: …»;
+                          #   чекбокс «Отсеивать сомнительные» (sessionStorage screener:safePairs, дефолт true),
+                          #   пред-фильтр по обороту до загрузки свечей, блок «Обновление свечей», кнопка «Обзор рынка»
   pages/SymbolPage.tsx    # торговый план + расклады по ТФ + вход (бумажный или ссылка на /live)
   pages/PaperPage.tsx     # бумажный портфель: P&L, «занято из депозита», таблица с колонкой
                           #   «Из депозита в сделке», «Закрыть по рынку»
@@ -125,6 +167,11 @@ tests/
                           #   planLadder (минимум позиции/риска под биржевые ограничения)
   tradeMode.test.ts       # режим торговли: дефолт paper, parseMode, isRealContext/effectiveMode, liveHref
   walkthrough.test.ts     # шаги обзора: уникальные заголовки, маршруты страниц
+  pairFilter.test.ts      # критерии «сомнительной» пары: SUSPICIOUS-пороги, причины, splitSuspicious, счётчики
+  marketRegime.test.ts    # сводка рынка и вердикт: уровни, перекос в шорты, поправка на ATR, no-data
+  klinePlan.test.ts       # бюджет свечей: effectiveCycleMs, perCycleFor, planRefresh (очередь без повторов), describeRefresh
+  ws.test.ts              # WsConnection на заглушке сокета: refcount, auth-рукопожатие, ping, бэк-офф, рамки
+  accountStream.test.ts   # парс/слияние приватных кадров: позиции (uP&L-дельта), ордера (терминальные), wallet, лента
 vitest.config.ts          # vitest run: node-окружение, include tests/**/*.test.ts, алиас virtual:bybit-dev-keys
 .env.example              # шаблон локальных ключей (API_KEY/API_SECRET/API_TESTNET)
 SESSION-MAINNET.md        # локальный файл (в .gitignore): сценарий и журнал retCode проверки API,
@@ -159,6 +206,50 @@ SESSION-MAINNET.md        # локальный файл (в .gitignore): сце�
 - Шортам планка выше (`SHORT_MIN_SCORE = 5`, лонги — от `LONG_MIN_SCORE = 4`): на бэктесте шорты хуже.
 - Скринер по умолчанию сортируется по «Приоритету» (`priorityOf`): уверенность + чистота/сила тренда +
   участие объёма минус штрафы (перегрев RSI, растянутая серия, слабый объём, шорты).
+- **Отсев сомнительных пар** (`lib/pairFilter.ts`, чекбокс «Отсеивать сомнительные», дефолт включён,
+  sessionStorage `screener:safePairs`). Критерии измеримые, пороги в константе `SUSPICIOUS`:
+  оборот 24 ч < 10 млн $ (ликвидность), ATR% < 0.25 (вялый ход), маржа при текущем риске/плече выше
+  потолка ставки (размер). Оборот отсекается **до** загрузки свечей (по тикерам) — это и есть экономия
+  запросов; ATR и размер остаются пост-фильтром по свечам. Отключать не стоит: на выборке 200 монет
+  ~50 % пар отсекается, из них почти все — по ликвидности.
+- **Обзор рынка** (`lib/marketRegime.ts` + `components/MarketOverview.tsx`, кнопка в шапке скринера):
+  сводка по выборке + общий вердикт — 4 уровня `go` / `cautious` / `stand-aside` / `no-data`.
+  Перекос сетапов в шорты ≥ 60 % даёт «Лучше не входить» со ссылкой на бэктест (шорты исторически слабее),
+  метрики дополнительно корректируются на медианный ATR выборки. Вердикт — ориентир, не блокировка входа.
+- **Бюджет свечных запросов** (`lib/klinePlan.ts` + `useKlines`): на 5-минутном ТФ обновляется срез
+  `perCycleFor(n, cycle)` символов — 6 самых ликвидных каждый цикл, остальные по круговой очереди;
+  потолки `maxPerCycle = 20`, `maxPerMinute = 15`. `effectiveCycleMs` — предохранитель частоты
+  (≥ 15 с на 1–3 мин, ≥ 75 с на 5 мин и выше), а не привязка к закрытию свечи: незакрытая свеча меняется,
+  данные должны оставаться свежими. Обновляет **тик цикла** (`useCycle` + явный `refetchQueries` по ключу
+  символа), а не `refetchInterval`: тот гоняется от момента собственной загрузки запроса и молча теряется
+  на границе цикла, а «какие запросы включены» меняется лишними рендерами — из-за чего шли дубли и повторы
+  (замер: 14 → те же 14 → 22 с повторами). `refetchOnWindowFocus`/`refetchOnMount` для kline выключены.
+  Первый прогон всё же грузит выборку целиком (иначе таблица пустая) — дальше работает кэш запроса.
+  Замер в браузере (выборка 200, 5 мин): было 199 запросов kline за одну загрузку и столько же в минуту;
+  стало 101–103 на первый прогон и **ровно 15 за цикл 75 с** (~12 в минуту, без дублей), плюс 1–2 запроса
+  на вновь появившиеся пары. Строка «Обновление свечей: …» в скринере показывает этот бюджет честно.
+  Кнопка «Обновить» — исключение из бюджета: это явный ручной запрос свежести, она перезапрашивает
+  тикеры **и** все свечи текущей выборки через `refetchQueries` по предикату (кэш запросов, FIFO-очередь
+  ограничивает конкуренцию), а не только тикеры, как раньше — иначе в таблице остаются протухшие сетапы.
+- **Живые сокеты Bybit** (`api/ws.ts`): публичный поток `tickers.{symbol}` даёт цены раз в 100 мс
+  (в интерфейс — пачкой раз в 400 мс, `tickerStore.ts`), приватный (`position`/`order`/`execution`/`wallet`)
+  приносит события счёта в момент сделки. Портфели — и бумажный, и реальный — живые. REST остаётся
+  страховкой и источником снимков: тикеры-фолбэк раз в 60 с, счёт опрашивается редко (15 с при
+  проблемах с сокетом, 60 с при живом потоке) и после реконнекта сокета (пока шёл auth, события могли
+  потеряться). Подписки с refcount: соединение поднимается только когда на темы кто-то смотрит,
+  живёт одна на (сеть + категория) и одна на (сеть + ключ), ping каждые 20 с, реконнект с бэк-оффом.
+  Приватное соединение подписывается `GET/realtime{expires}` (HMAC-SHA256, как и REST).
+- Приватные темы: `position` шлёт событие на каждое создание/отмену ордера и закрытие позиции
+  (size 0 ⇒ убираем строку, дельта uP&L прибавляется к кошельку — событие `wallet` на движение uP&L
+  не приходит), `order` снимает исполненные/отменённые/отклонённые (`Filled`/`Cancelled`/`Canceled`/
+  `Rejected`), `execution` — лента последних 20 исполнений на `/live`, `wallet` обновляет балансы
+  (uP&L восстанавливается как разность балансов). В REST `order/realtime` отменённые тоже фильтруются
+  — теперь по обеим грамматикам «Cancelled».
+- Сокеты — данные, но не сценарная логика: материализация стопов/TP бумажных позиций по-прежнему
+  на закрытых свечах (`settleOpen`), уносятся в localStorage по циклу kline. Цены и P&L при этом живые.
+  Полный перевод скринера на сокеты не делаем: универсум 892 монеты в 1 запросе/мин дешевле сотен
+  подписок `tickers.*` на 100 мс; история свечей сокет не даёт (только текущий бар), поэтому kline
+  остаётся на REST-бюджете из `klinePlan.ts`.
 - Ставка (`paper:stake`) — потолок суммарной маржи, а не деньги одной позиции. Деньги депозита в
   сделке = маржа = номинал/плечо; это показывают колонка «Из депозита в сделке» в `/paper`, карточка
   «Занято из депозита» + «Торговый номинал», и первая цифра в панели быстрого входа.
@@ -172,6 +263,13 @@ SESSION-MAINNET.md        # локальный файл (в .gitignore): сце�
   Лимита на количество открытых позиций нет (`maxOpen = Infinity`).
 - P&L в $ = движение цены × количество и НЕ зависит от плеча; % показан к ставке и к марже (номинал/плечо) —
   маржинальный % отражает реальную доходность при плече (см. `positionMetrics` и поля `Pnl`).
+- **Аналитика по закрытым** (`lib/paperStats.ts` + `components/PaperAnalytics.tsx` на /paper): срезы
+  по направлению/уверенности/ATR/ТФ/исходу + кривая доходности по времени закрытия (SVG). Показывает,
+  где реально зарабатывает, а не «кажется, что прибыльно». Показывается только когда есть закрытые позиции.
+- **Журнал сигналов** (`lib/signalLog.ts`): скринер пишет снимок сетапов при каждом завершённом прогоне
+  (топ-20 по приоритету, дедуп одинаковых кадров за минуту, TTL 14 дней, localStorage `paper:signals:v1`).
+  Нужен, чтобы ответить «из показанных за неделю сетапов я взял такие-то — как они отработали»;
+  формула `priorityOf` проверяется на собственных решениях, а не только на бэктесте.
 - Единая логика входа — `entryBlockReason`/`makePaperPosition` (страница символа, кнопки «Вход» в таблицах,
   реальный `/live`). Кнопки «Вход»/«Закрыть по рынку» не открывают страницу разбора (stopPropagation).
 - Старшие таймфреймы против позиции — мягкий сигнал (`htfRisk`, ≥2 из {60,120,240}), не ворота.
@@ -193,6 +291,9 @@ SESSION-MAINNET.md        # локальный файл (в .gitignore): сце�
   посетителя, чужих ключей приложение не видит.
 - Реальный API: креды в localStorage (`bybit:api:credentials:v1`), при локальной работе — из `.env`;
   подпись HMAC-SHA256 клиентски (Web Crypto), CORS Bybit V5 разрешает приватные запросы — сервер не нужен.
+  Галочка «Не сохранять ключ» на /api (sessionStorage `api:sessionKeys`) — креды только в памяти вкладки
+  (`saveCredentials(c, persist=false)`), в localStorage ничего не пишется; `loadCredentials` смотрит
+  сессию → localStorage → `.env`.
   `openReal` = установка плеча → лимитный вход со столом (SL, trigger MarkPrice) → reduce-only лимитки
   TP1/TP2/TP3 (PostOnly). Закрытие — отмена ордеров + маркет reduceOnly (`qty: 0` + `closeOnTrigger`).
   Стоп в безубыток — `/v5/position/trading-stop`.
@@ -243,17 +344,34 @@ git add -A; git commit -m "bybit screener"; git push -u origin main
 - `bun run build` — обязательно перед коммитом.
 - `bun run test` (не `bun test`!) и `bun run lint` — перед коммитом. Тесты не зависят от сети
   (fetch мокается; приватные подписи сверяются с node:crypto).
+- ⚠️ **«Закрыть все позиции» временно disabled** (`closeAllPositions`/`closeAllReal` + кнопки на
+  `/paper`, `/live`, `/real`). После подтверждения confirm вкладка роняет Chrome (ённый краш воспроизвёлся
+  при клике через CDP: confirm открывается, accept проходит, затем «Target closed»). Подозрение — бесконечный
+  ре-рендер/цикл при опустошении портфеля (синхронизация `usePaperPositions` через `CHANGED_EVENT` +
+  живые цены/сокеты на пустых группах). TODO-комментарии в коде у кнопок. Разбор — следующая задача:
+  воспроизвести без CDP (обычный клик), снять стек; кандидаты: `emitChanged`/`update`, `useWsPrices` на
+  пустой сигнатуре, `useLivePrices` при `groups=[]`, реконнект `WsConnection.maybeClose`.
 - Живая проверка в браузере через chrome-devtools: скринер → клик по строке → страница плана без ошибок
   в консоли; при подключённом API — `/api`, `/real`, `/live` (счёт, маржа, позиции, ордера). На `/live`
   проверить строку «Минимум для лесенки»: с маленькой ставкой кнопка «Открыть ордер» заблокирована
   с объяснением, с достаточной — активна (после галочки «реальные деньги» на мейннете).
+- Сокеты при живой проверке: у портфелей (бумажного и реального) в шапке должна появиться метка
+  «поток live»; цена открытой бумажной позиции меняется каждые ~400 мс без `refetch`, на `/live` в
+  логе консоли есть `ws public …: open` и `ws private …: open`. Если вместо «поток live» висит
+  «переподключение, данные из REST» — это штатный откат, но стоит заглянуть в сеть: обрывы реже
+  раза в минуту означают, что поток блокируется (регион/прокси) и работает страховка.
   ⚠️ Переход `navigate_page` на тот же hash ничего не перезагружает — компонент остаётся со старым
   состоянием. Чтобы увидеть effect от изменения sessionStorage, нужен `type: reload`.
   После долгого набора HMR-правок, если браузер держит старый модуль, — перезапустить dev-сервер.
-  Предупреждение React Query «Duplicate Queries found» на `/paper` — от дублей ключей kline при
-  нескольких позициях по одному символу/ТФ, не ошибка.
+  Предупреждение React Query «Duplicate Queries found» на `/paper` было от дублей ключей kline —
+  исправлено картой по `candleKey(category, symbol, interval)`; если появится снова, чинить дедуп, а не глушить.
+- Правку бюджета свечей проверять замером, а не на глаз: `performance.getEntriesByType('resource')`,
+  фильтр по `/v5/market/kline`, reload → ждать 2–3 цикла. Ожидаемо: первый прогон = выборка целиком,
+  дальше ровно `perCycleFor(...)` за цикл без повторов внутри окна. Замеры делать короткими вызовами:
+  `evaluate_script` с ожиданием дольше ~20 с внутри одного вызова обрывается.
 - Перед коммитом проверить, что секреты не утёкли в сборку: собрать и сравнить значения `.env`
   с `dist/assets/*`; `git check-ignore -v .env` должен показывать правило из `.gitignore`.
-- Осторожно с лимитами Bybit: kline-запросы — FIFO-очередь (≤10 одновременно), CORS-fallback `/bybit`
-  только в dev; кеш React Query: тикеры stale 15 с / рефетч 60 с, kline stale 30 с / рефетч 120 с.
+- Осторожно с лимитами Bybit: kline-запросы — FIFO-очередь (≤10 одновременно) и бюджет цикла
+  (`klinePlan.ts`), CORS-fallback `/bybit` только в dev; кеш React Query: тикеры stale 30 с / рефетч 60 с,
+  kline — без автоинтервала, обновляет тик цикла.
 - Кликабельные строки таблиц доступны с клавиатуры (Enter/Space) — через `rowKeyProps`.

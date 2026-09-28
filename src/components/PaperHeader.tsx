@@ -2,11 +2,13 @@ import { Link, useLocation } from 'react-router-dom';
 import { usePaperPositions } from '../hooks/usePaper';
 import { useApiAccount } from '../hooks/useApiAccount';
 import { groupByCategory, useLivePrices } from '../hooks/useLivePrices';
+import { usePublicWsLive } from '../lib/tickerStore';
 import { useTradingMode } from '../hooks/useTradingMode';
 import { totalPnlOf } from '../lib/paper';
 import { effectiveMode } from '../lib/tradeMode';
 import { fmt, fmtCompact } from '../lib/format';
 import Term from './Term';
+import WsBadge from './WsBadge';
 import TradeModeSwitch from './TradeModeSwitch';
 
 /** Округлённое число с группировкой разрядов (ru), например «7 463». */
@@ -24,7 +26,9 @@ export default function PaperHeader() {
   const shown = effectiveMode(mode, pathname);
   const { positions } = usePaperPositions();
   const open = positions.filter((p) => p.status === 'open');
-  const prices = useLivePrices(groupByCategory(open));
+  const groups = groupByCategory(open);
+  const prices = useLivePrices(groups);
+  const paperWs = usePublicWsLive(groups.map((g) => g.category));
 
   let unreal = 0;
   let engaged = 0;
@@ -85,6 +89,7 @@ export default function PaperHeader() {
             <span className="muted"> · <Term t="margin" label="Задействовано" /> {fmtInt(engaged)} $</span>
           </Link>
         )}
+        {shown === 'real' ? <WsBadge state={api.ws} testnet={api.testnet} /> : <WsBadge state={paperWs} />}
       </div>
     </div>
   );
