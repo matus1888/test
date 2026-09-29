@@ -10,6 +10,7 @@ import { fmt, fmtCompact } from '../lib/format';
 import Term from './Term';
 import WsBadge from './WsBadge';
 import TradeModeSwitch from './TradeModeSwitch';
+import InstallButton from './InstallButton';
 
 /** Округлённое число с группировкой разрядов (ru), например «7 463». */
 const fmtInt = (v: number) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(v);
@@ -26,7 +27,9 @@ export default function PaperHeader() {
   const shown = effectiveMode(mode, pathname);
   const { positions } = usePaperPositions();
   const open = positions.filter((p) => p.status === 'open');
-  const groups = groupByCategory(open);
+  // Заявки в рынке — не позиции: у них нет P&L, но они видны пользователю.
+  const pending = positions.filter((p) => p.status === 'pending');
+  const groups = groupByCategory([...open, ...pending]);
   const prices = useLivePrices(groups);
   const paperWs = usePublicWsLive(groups.map((g) => g.category));
 
@@ -62,6 +65,7 @@ export default function PaperHeader() {
           title="Обзор приложения (walkthrough)"
           onClick={() => window.dispatchEvent(new Event('open-walkthrough'))}
         >?</button>
+        <InstallButton />
         <TradeModeSwitch />
         {shown === 'real' ? (
           live ? (
@@ -86,6 +90,7 @@ export default function PaperHeader() {
             <Term t="paperTrading" label="Бумажный портфель" />{' '}
             <b className={cls}>{total >= 0 ? '+' : ''}{fmt(total)} $</b>
             <span className="muted"> · {open.length} откр.</span>
+            {pending.length > 0 && <span className="muted"> · {pending.length} лим.</span>}
             <span className="muted"> · <Term t="margin" label="Задействовано" /> {fmtInt(engaged)} $</span>
           </Link>
         )}

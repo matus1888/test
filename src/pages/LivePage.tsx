@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -23,10 +23,15 @@ import { parseLiveLink } from '../lib/tradeMode';
 import { fmt, fmtCompact } from '../lib/format';
 import { setupCls, setupText } from '../lib/ui';
 import Term from '../components/Term';
+import PairLink from '../components/PairLink';
 import EnvBadge from '../components/EnvBadge';
 import WsBadge from '../components/WsBadge';
+import { useConfirm } from '../components/Confirm';
 
 const isPositiveNumber = (v: unknown): v is number => typeof v === 'number' && v > 0;
+
+/** Похоже на тикер Bybit — иначе в поле символа нечего превращать в ссылку на биржу. */
+const isTicker = (v: string) => /^[A-Z0-9]{5,20}$/.test(v);
 
 /** Реальная торговля через API Bybit (сеть — та, что в сохранённых ключах). */
 export default function LivePage() {
@@ -50,7 +55,9 @@ export default function LivePage() {
   const [busy, setBusy] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // ReactNode, а не строка: в уведомлениях символ должен быть ссылкой на биржу (PairLink).
+  const [notice, setNotice] = useState<ReactNode>(null);
+  const [confirm, confirmDialog] = useConfirm();
 
   const testnet = !!cred?.testnet;
   const sym = symbol.trim().toUpperCase();
@@ -95,7 +102,12 @@ export default function LivePage() {
     try {
       const riskMoney = deposit * (riskPct / 100);
       const res = await openReal(cred, { category: 'linear', symbol: sym, plan, riskMoney, leverage: lev });
-      setNotice(`${sym} ${plan.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'}: вход ${res.entryOrder.orderId}, TP-лимиток ${res.tpOrders.length}, qty ${res.qty}, маржа ~${fmt(res.margin, 0)} $`);
+      setNotice(
+        <>
+          <PairLink symbol={sym} category="linear" />{' '}
+          {plan.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'}: вход {res.entryOrder.orderId}, TP-лимиток {res.tpOrders.length}, qty {res.qty}, маржа ~{fmt(res.margin, 0)} $
+        </>,
+      );
       reload();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
@@ -109,7 +121,7 @@ export default function LivePage() {
     setBusy(true); setActionError(null); setNotice(null);
     try {
       await closeReal(cred, { category: 'linear', symbol: s, direction });
-      setNotice(`${s}: закрыт по рынку`);
+      setNotice(<><PairLink symbol={s} category="linear" />: закрыт по рынку</>);
       reload();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
@@ -120,9 +132,13 @@ export default function LivePage() {
 
   const doCloseAll = async () => {
     if (!cred || !canTrade || positions.length === 0) return;
-    if (!window.confirm(
-      `Закрыть все позиции (${positions.length}) по рынку?\n\nДействие отправляет настоящие ордера на ${testnet ? 'тестнет' : 'мейннет'} Bybit.`,
-    )) return;
+    const ok = await confirm({
+      title: 'Закрыть все позиции по рынку?',
+      text: `Позиций: ${positions.length}. Действие отправляет настоящие ордера на ${testnet ? 'тестнет' : 'мейннет'} Bybit.`,
+      ok: 'Закрыть всё',
+      danger: true,
+    });
+    if (!ok) return;
     setBusy(true); setActionError(null); setNotice(null);
     try {
       const list = positions.map((p) => ({
@@ -148,7 +164,7 @@ export default function LivePage() {
     setBusy(true); setActionError(null); setNotice(null);
     try {
       await moveStopToBreakeven(cred, { category: 'linear', symbol: s, entryPrice: entry });
-      setNotice(`${s}: стоп перенесён в безубыток`);
+      setNotice(<><PairLink symbol={s} category="linear" />: стоп перенесён в безубыток</>);
       reload();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
@@ -171,6 +187,7 @@ export default function LivePage() {
   if (!cred) {
     return (
       <div className="page">
+        {confirmDialog}
         <Link to="/" className="back">← Назад к скринеру</Link>
         <p className="state">Сначала подключи API-ключи на странице <Link to="/api">/api</Link> (тестнет — безопаснее).</p>
       </div>
@@ -192,6 +209,7 @@ export default function LivePage() {
 
   return (
     <div className="page">
+      {confirmDialog}
       <Link to="/" className="back">← Назад к скринеру</Link>
 
       <header className="top">
@@ -227,6 +245,11 @@ export default function LivePage() {
           <label>Символ
             <input name="liveSymbol" value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="BTCUSDT" />
           </label>
+          {isTicker(sym) && (
+            <p className="state">
+              Торговля на бирже: <PairLink symbol={sym} category="linear" withText />
+            </p>
+          )}
           <label>Таймфрейм
             <select name="liveInterval" value={interval} onChange={(e) => setLiveInterval(e.target.value as Interval)}>
               {INTERVALS.map((i) => <option key={i} value={i}>{INTERVAL_LABELS[i]}</option>)}
@@ -274,10 +297,7 @@ export default function LivePage() {
             <>
             {canTrade && (
               <div className="table-actions">
-                {/* TODO(crash): «Закрыть все» на /live роняет вкладку после confirm
-                    (подозрение: бесконечный ре-рендер при опустошении портфеля/сокетов),
-                    затем вернуть в работу и добавить e2e-проверку. Временно disabled. */}
-                <button className="btn btn-sm btn-close-all" disabled onClick={doCloseAll} title="Временно отключено: закрытие всех роняет страницу — идёт разбор причины">
+                <button className="btn btn-sm btn-close-all" disabled={busy} onClick={() => void doCloseAll()}>
                   {busy ? 'Закрываем…' : 'Закрыть все'}
                 </button>
               </div>
@@ -289,7 +309,10 @@ export default function LivePage() {
                   const dir: 'long' | 'short' = p.side === 'Buy' ? 'long' : 'short';
                   return (
                     <tr key={`${p.symbol}-${p.positionIdx}`}>
-                      <td className="sym">{p.symbol}<br /><span className="muted">×{p.leverage} {p.side === 'Buy' ? 'ЛОНГ' : 'ШОРТ'}</span></td>
+                      <td className="sym">
+                        <PairLink symbol={p.symbol} category="linear" /><br />
+                        <span className="muted">×{p.leverage} {p.side === 'Buy' ? 'ЛОНГ' : 'ШОРТ'}</span>
+                      </td>
                       <td className={p.unrealisedPnl >= 0 ? 'pos' : 'neg'}>{fmt(p.unrealisedPnl)} $<br /><span className="muted">вход {fmt(p.avgPrice, p.avgPrice < 1 ? 5 : 4)}</span></td>
                       <td className="muted">LIQ {p.liqPrice == null ? '—' : fmt(p.liqPrice, p.liqPrice < 1 ? 5 : 4)}</td>
                       <td>
@@ -319,7 +342,7 @@ export default function LivePage() {
               <tbody>
                 {orders.map((o) => (
                   <tr key={o.orderId}>
-                    <td className="sym">{o.symbol}</td>
+                    <td className="sym"><PairLink symbol={o.symbol} category="linear" /></td>
                     <td className={o.side === 'Buy' ? 'pos' : 'neg'}>{o.side === 'Buy' ? 'ПОКУПКА' : 'ПРОДАЖА'}</td>
                     <td>{o.orderType}{o.orderLinkId?.startsWith('tp') ? ' · TP' : ''}{o.orderLinkId?.startsWith('ent') ? ' · вход' : ''}</td>
                     <td>{fmt(o.qty, 4)}</td>
@@ -344,7 +367,7 @@ export default function LivePage() {
                 {account.fills.map((f) => (
                   <tr key={f.execId}>
                     <td className="muted">{new Date(f.execTime).toLocaleTimeString('ru-RU')}</td>
-                    <td className="sym">{f.symbol}</td>
+                    <td className="sym"><PairLink symbol={f.symbol} category="linear" /></td>
                     <td className={f.side === 'Buy' ? 'pos' : 'neg'}>{f.side === 'Buy' ? 'ПОКУПКА' : 'ПРОДАЖА'}</td>
                     <td>{fmt(f.execPrice, f.execPrice < 1 ? 5 : 4)}</td>
                     <td>{fmt(f.execQty, 4)}</td>

@@ -28,6 +28,7 @@ export default function AccountPage() {
   const api = useApiAccount();
   const { positions } = usePaperPositions();
   const open = positions.filter((p) => p.status === 'open');
+  const pending = positions.filter((p) => p.status === 'pending');
   const prices = useLivePrices(groupByCategory(open));
 
   let net = 0;
@@ -93,6 +94,7 @@ export default function AccountPage() {
           <h3><Term t="paperTrading" label="Бумажный портфель" /></h3>
           <div className="lvl"><span>Общий P&L</span><b className={net >= 0 ? 'pos' : net < 0 ? 'neg' : ''}>{net >= 0 ? '+' : ''}{fmt(net)} $</b></div>
           <div className="lvl"><span>Открытых</span><b>{open.length}</b></div>
+          <div className="lvl"><span>Лимитов в рынке</span><b>{pending.length}</b></div>
           <div className="lvl"><span>Задействовано</span><b>{fmt(engaged)} $</b></div>
         </div>
 

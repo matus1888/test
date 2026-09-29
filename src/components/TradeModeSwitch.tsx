@@ -2,6 +2,7 @@ import { useLocation } from 'react-router-dom';
 import { useTradingMode } from '../hooks/useTradingMode';
 import { MODE_LABEL, REAL_MODE_CONFIRM, isRealContext, type TradeMode } from '../lib/tradeMode';
 import Term from './Term';
+import { useConfirm } from './Confirm';
 
 /**
  * Переключатель «Бумага ⇄ Реально» в шапке. На страницах реального счёта (/live, /real)
@@ -10,6 +11,7 @@ import Term from './Term';
 export default function TradeModeSwitch() {
   const { pathname } = useLocation();
   const [mode, setMode] = useTradingMode();
+  const [confirm, confirmDialog] = useConfirm();
 
   if (isRealContext(pathname)) {
     return (
@@ -22,13 +24,17 @@ export default function TradeModeSwitch() {
     );
   }
 
-  const ask = (next: TradeMode) => {
-    if (next === 'real' && !window.confirm(REAL_MODE_CONFIRM)) return;
+  const ask = async (next: TradeMode) => {
+    if (next === 'real') {
+      const ok = await confirm({ title: 'Включить реальный режим?', text: REAL_MODE_CONFIRM, ok: 'Включить', danger: true });
+      if (!ok) return;
+    }
     setMode(next);
   };
 
   return (
     <div className="mode-switch">
+      {confirmDialog}
       <Term t="tradeMode" label="Режим" />
       <div className="seg mode-seg" role="group" aria-label="Режим торговли: бумажный или реальный">
         {(['paper', 'real'] as const).map((m) => (

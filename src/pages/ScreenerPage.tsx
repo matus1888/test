@@ -16,8 +16,8 @@ import { useKlines, useTickers } from '../hooks/useMarket';
 import { usePaperPositions } from '../hooks/usePaper';
 import { useSessionState } from '../hooks/useSessionState';
 import { useTradingMode } from '../hooks/useTradingMode';
-import { fmt, fmtCompact, fmtPct } from '../lib/format';
-import { entryBlockReason, makePaperPosition } from '../lib/paper';
+import { fmt, fmtCompact, fmtPct, fmtPctAbs } from '../lib/format';
+import { entryBlockReason, makePaperPosition, type EntryKind } from '../lib/paper';
 import { describeRefresh, effectiveCycleMs, perCycleFor } from '../lib/klinePlan';
 import { hiddenReasonsCount, splitSuspicious, SUSPICIOUS } from '../lib/pairFilter';
 import { liveHref } from '../lib/tradeMode';
@@ -33,6 +33,7 @@ import {
   type SortKey,
 } from '../lib/screener';
 import Term from '../components/Term';
+import PairLink from '../components/PairLink';
 
 const isLimit = (v: unknown): v is number =>
   typeof v === 'number' && [25, 50, 100, 200].includes(v);
@@ -53,7 +54,9 @@ export default function ScreenerPage() {
   const { positions, add } = usePaperPositions();
   const [mode] = useTradingMode();
   const real = mode === 'real';
-  const [entryMsg, setEntryMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  // Символ храним отдельно от текста, чтобы в уведомлении он был ссылкой на биржу,
+  // а не простой строкой (см. PairLink).
+  const [entryMsg, setEntryMsg] = useState<{ symbol: string; text: string; ok: boolean } | null>(null);
   const [category, setCategory] = useSessionState<Category>('screener:category', 'linear', isCategory);
   const [interval, setInterval] = useSessionState<Interval>('screener:interval', '5', isInterval);
   const [maxSymbols, setMaxSymbols] = useSessionState<number>('screener:limit', 50, isLimit);
@@ -125,8 +128,8 @@ export default function ScreenerPage() {
   const setupCount = kept.filter((r) => r.direction === 'long' || r.direction === 'short').length;
   const openByDirection = useMemo(
     () => ({
-      long: positions.filter((p) => p.status === 'open' && p.direction === 'long').length,
-      short: positions.filter((p) => p.status === 'open' && p.direction === 'short').length,
+      long: positions.filter((p) => (p.status === 'open' || p.status === 'pending') && p.direction === 'long').length,
+      short: positions.filter((p) => (p.status === 'open' || p.status === 'pending') && p.direction === 'short').length,
     }),
     [positions],
   );
@@ -141,27 +144,51 @@ export default function ScreenerPage() {
   };
 
   /** Быстрый вход из таблицы: берёт план строки и текущие параметры риска/плеча. */
-  const quickEntry = (r: Row) => {
+  const quickEntry = (r: Row, kind: EntryKind = 'limit') => {
     if (!r.plan) return;
     const direction: 'long' | 'short' = r.plan.direction === 'short' ? 'short' : 'long';
     const draft = { symbol: r.symbol, category, interval, direction };
-    const reason = entryBlockReason(positions, draft, r.plan, { deposit, riskPct, stake, leverage: lev });
+    const entry = { kind, price: r.plan.price } as const;
+    const reason = entryBlockReason(positions, draft, r.plan, { deposit, riskPct, stake, leverage: lev }, entry);
     if (reason) {
-      setEntryMsg({ text: `${r.symbol}: ${reason}`, ok: false });
+      setEntryMsg({ symbol: r.symbol, text: reason, ok: false });
       return;
     }
-    const pos = makePaperPosition(r.symbol, category, interval, r.plan, { deposit, riskPct, stake, leverage: lev });
+    const pos = makePaperPosition(r.symbol, category, interval, r.plan, { deposit, riskPct, stake, leverage: lev }, entry);
     if (!add(pos)) {
-      setEntryMsg({ text: `${r.symbol}: вход заблокирован — дубль или лимит`, ok: false });
+      setEntryMsg({ symbol: r.symbol, text: 'вход заблокирован — дубль или лимит', ok: false });
       return;
     }
-    setEntryMsg({ text: `${r.symbol}: бумажный вход открыт · риск ${fmt(pos.riskMoney)}$ ×${pos.leverage}`, ok: true });
+    const riskNow = `${fmt(riskMoney)} $`;
+    if (kind === 'market') {
+      const dist = Math.abs(pos.entryPrice - pos.stop);
+      const planDist = r.plan.riskDist;
+      setEntryMsg({
+        symbol: r.symbol,
+        text: `вход по рынку ${fmt(pos.entryPrice)} · риск ${riskNow} ×${pos.leverage} · `
+          + `до стопа ${fmtPctAbs((dist / pos.entryPrice) * 100, 2)} вместо ${fmtPctAbs((planDist / pos.entryPrice) * 100, 2)} по плану`
+          + ` · проскальзывание в бумаге не учитывается`,
+        ok: true,
+      });
+      return;
+    }
+    const toLimit = ((r.plan.price - pos.entryPrice) * (pos.direction === 'long' ? 1 : -1)) / pos.entryPrice;
+    const wait = toLimit > 0
+      ? `цена сейчас ${pos.direction === 'long' ? 'выше' : 'ниже'} лимита ${fmt(pos.entryPrice)}`
+        + ` на ${fmtPctAbs(toLimit * 100, 2)} — ждём ${pos.direction === 'long' ? 'отката' : 'роста'}`
+      : `лимит ${fmt(pos.entryPrice)} уже в рынке — заявка исполнится сразу`;
+    setEntryMsg({
+      symbol: r.symbol,
+      text: `заявка выставлена · лимит ${fmt(pos.entryPrice)} · риск ${riskNow} ×${pos.leverage} · ${wait}`,
+      ok: true,
+    });
   };
 
   /**
-   * Кнопка входа в строке. В бумажном режиме открывает виртуальную позицию,
-   * в реальном — ведёт на форму реального ордера (/live), где нужен явный
-   * подтверждающий клик: из таблицы деньги не тратятся.
+   * Кнопка входа в строке. В бумажном режиме выставляет виртуальную лимитную
+   * заявку (позиция появится после касания лимита), в реальном — ведёт на форму
+   * реального ордера (/live), где нужен явный подтверждающий клик: из таблицы
+   * деньги не тратятся.
    */
   const entryAction = (r: Row) => {
     if (!r.plan) return;
@@ -170,6 +197,17 @@ export default function ScreenerPage() {
       return;
     }
     quickEntry(r);
+  };
+
+  /** Вход по рынку из строки. В реальном режиме кнопки нет: настоящий рыночный ордер
+   *  отправляется только с /live, поэтому ведём на форму ордера, как и лимитный вход. */
+  const marketEntryAction = (r: Row) => {
+    if (!r.plan) return;
+    if (real) {
+      navigate(liveHref(r.symbol, interval));
+      return;
+    }
+    quickEntry(r, 'market');
   };
 
   const klineLoading = klines.some((k) => k.loading);
@@ -292,7 +330,11 @@ export default function ScreenerPage() {
       )}
 
       {entryMsg && (
-        <p className={`state ${entryMsg.ok ? '' : 'err'}`}>{entryMsg.ok ? '✓ ' : '✕ '}{entryMsg.text}</p>
+        <p className={`state ${entryMsg.ok ? '' : 'err'}`}>
+          {entryMsg.ok ? '✓ ' : '✕ '}
+          <PairLink symbol={entryMsg.symbol} category={category} />{' · '}
+          {entryMsg.text}
+        </p>
       )}
 
       <div className="table-wrap">
@@ -309,7 +351,7 @@ export default function ScreenerPage() {
           <tbody>
             {visible.map((r) => (
               <tr key={r.symbol} {...rowKeyProps(() => openSymbol(r.symbol), `Открыть план ${r.symbol}`)}>
-                <td className="sym">{r.symbol}</td>
+                <td className="sym"><PairLink symbol={r.symbol} category={category} /></td>
                 <td>{fmt(r.m?.lastPrice ?? r.price, r.price < 1 ? 5 : 2)}</td>
                 <td>{fmtCompact(r.turnover)}</td>
                 <td className={setupCls(r.direction)}>
@@ -321,8 +363,18 @@ export default function ScreenerPage() {
                       onClick={(e) => { e.stopPropagation(); entryAction(r); }}
                       title={real
                         ? 'Реальный режим: откроет форму ордера на /live (риск и плечо перенесутся). Ордер уходит только после подтверждения'
-                        : 'Бумажный вход: размер от риска, вход по середине зоны, текущие ставка/плечо. Реальные деньги не двигаются'}
+                        : 'Бумажный вход: лимитная заявка по середине зоны, размер от риска, текущие ставка/плечо. Позиция откроется, когда цена дойдёт до лимита. Реальные деньги не двигаются'}
                     >{real ? 'Реальный вход →' : 'Вход (бумага)'}</button>
+                  )}
+                  {r.plan && r.plan.direction !== 'wait' && (
+                    <button
+                      type="button"
+                      className="btn btn-sm quick-entry quick-entry-market"
+                      onClick={(e) => { e.stopPropagation(); marketEntryAction(r); }}
+                      title={real
+                        ? 'Реальный режим: откроет форму ордера на /live. Рыночный ордер отправляется только оттуда и только после подтверждения'
+                        : 'Вход по рынку: исполнение сразу по текущей цене, без ожидания отката. Риск в $ тот же, дистанция до стопа больше. Проскальзывание в бумаге не учитывается'}
+                    >{real ? 'Реальный →' : 'По рынку'}</button>
                   )}
                 </td>
                 <td>{r.confidence == null ? '—' : `${r.confidence}%`}</td>

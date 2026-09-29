@@ -19,6 +19,7 @@ import { setupCls, setupText, rowKeyProps } from '../lib/ui';
 import { buildTradePlan, htfRisk } from '../lib/tradePlan';
 import StrategyChart from '../components/StrategyChart';
 import Term from '../components/Term';
+import PairLink from '../components/PairLink';
 import TermList from '../components/TermList';
 import QuickTrade from '../components/QuickTrade';
 import { ExternalIcon } from '../components/icons';
@@ -31,6 +32,7 @@ import {
   liquidationPrice,
   liqToStopRatio,
   makePaperPosition,
+  type EntryKind,
 } from '../lib/paper';
 
 const isPositiveNumber = (v: unknown): v is number => typeof v === 'number' && v > 0;
@@ -131,9 +133,21 @@ export default function SymbolPage() {
   const notional = qty * (plan?.entryMid ?? 0);
 
   // Бумажный вход — лимитно по середине зоны (как велит план), размер из риска.
-  // Исполнение по рынку завышало бы вход и урезало реализованный R тейков.
+  // Заявка не позиция: она исполнится, когда цена дойдёт до entryMid (см. fillTimeOf).
+  // Исполнение по рынку завышало бы вход и урезало реализованный R тейков — и, что важнее,
+  // давало бы «мгновенную прибыль» на пустом месте: цена до лимита ещё не дошла.
   const entryPrice = plan ? plan.entryMid : 0;
+  // Насколько цена сейчас выше/ниже лимита: 0 — заявка в рынке, > 0 — ждём откат.
+  const toLimit = plan && plan.direction !== 'wait' && plan.price > 0
+    ? ((plan.price - plan.entryMid) * (plan.direction === 'long' ? 1 : -1)) / plan.entryMid
+    : 0;
   const marginNeeded = entryPrice > 0 && lev > 0 ? (qty * entryPrice) / lev : 0;
+  // Вход по рынку: цена = текущая котировка, размер — от фактической дистанции
+  // до стопа (она больше плановой), поэтому маржа тоже больше.
+  const marketPrice = plan && plan.direction !== 'wait' && plan.price > 0 ? plan.price : 0;
+  const marketDist = plan && marketPrice > 0 ? Math.abs(marketPrice - plan.stop) : 0;
+  const marketQty = marketDist > 0 ? riskMoney / marketDist : 0;
+  const marketMargin = marketPrice > 0 && lev > 0 ? (marketQty * marketPrice) / lev : 0;
   // Ликвидация и её запас относительно стопа: высокие плечи на широких стопах дают
   // margin call раньше стопа — классическая проблема, которую этот guard убирает.
   const liq = plan && plan.direction !== 'wait' && entryPrice > 0 && lev > 0
@@ -150,9 +164,23 @@ export default function SymbolPage() {
         plan,
         { deposit, riskPct, stake, leverage: lev },
       );
-  const openPaper = () => {
-    if (!plan || plan.direction === 'wait' || blockReason) return;
-    const pos = makePaperPosition(symbol, category, interval, plan, { deposit, riskPct, stake, leverage: lev });
+  // Вход по рынку: та же проверка, но цена — текущая котировка, а не середина зоны.
+  const marketBlockReason = !plan || plan.direction === 'wait'
+    ? 'Нет направленного сетапа'
+    : entryBlockReason(
+        positions,
+        { symbol, category, interval, direction: plan.direction },
+        plan,
+        { deposit, riskPct, stake, leverage: lev },
+        { kind: 'market', price: plan.price },
+      );
+  const openPaper = (kind: EntryKind) => {
+    if (!plan || plan.direction === 'wait') return;
+    if ((kind === 'market' ? marketBlockReason : blockReason) != null) return;
+    const pos = makePaperPosition(symbol, category, interval, plan, { deposit, riskPct, stake, leverage: lev }, {
+      kind,
+      price: plan.price,
+    });
     const ok = add(pos);
     if (!ok) return; // блокировку мог «опередить» другой клик — дубль не создаём
     navigate(`/paper/${pos.id}`);
@@ -184,7 +212,10 @@ export default function SymbolPage() {
 
       <header className="top">
         <div>
-          <h1>{symbol} <span className="muted">· {category} · {INTERVAL_LABELS[interval]}</span></h1>
+          <h1>
+            <PairLink symbol={symbol} category={category} />{' '}
+            <span className="muted">· {category} · {INTERVAL_LABELS[interval]}</span>
+          </h1>
           <p className="sub">
             {ticker ? (
               <>
@@ -247,9 +278,13 @@ export default function SymbolPage() {
               riskMoney={riskMoney}
               marginNeeded={marginNeeded}
               blockReason={blockReason}
+              marketPrice={marketPrice}
+              marketMargin={marketMargin}
+              marketBlockReason={marketBlockReason}
               liq={liq}
               liqRatio={liqRatio}
-              onOpen={openPaper}
+              onOpen={() => openPaper('limit')}
+              onOpenMarket={() => openPaper('market')}
               realHref={realHref}
             />
           )}
@@ -296,7 +331,12 @@ export default function SymbolPage() {
                 : <>
                     <div className="lvl"><span><Term t="entryZone" label="Зона" /></span><b>{fmt(plan.entryLow, priceDecimals)} – {fmt(plan.entryHigh, priceDecimals)}</b></div>
                     <div className="lvl"><span><Term t="entryMid" label="Середина" /></span><b>{fmt(plan.entryMid, priceDecimals)}</b></div>
-                    <p className="state"><Term t="limit" label="Лимитной заявкой" /> в зоне, не по рынку.</p>
+                    <p className="state">
+                      <Term t="limit" label="Лимитной заявкой" /> в зоне, не по рынку.
+                      {toLimit > 0.0001
+                        ? ` Сейчас цена ${toLimit > 0 ? 'выше' : 'ниже'} лимита на ${fmtPct(Math.abs(toLimit) * 100, 2)} — заявка исполнится на откате.`
+                        : ' Лимит уже в рынке — заявка исполнится сразу.'}
+                    </p>
                   </>}
             </div>
             <div className="card">

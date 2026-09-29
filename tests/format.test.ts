@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmt, fmtCompact, fmtPct } from '../src/lib/format';
+import { fmt, fmtCompact, fmtPct, fmtPctAbs } from '../src/lib/format';
 import { numCls, setupCls, setupText } from '../src/lib/ui';
 
 describe('fmt', () => {
@@ -30,6 +30,19 @@ describe('fmtPct', () => {
     expect(fmtPct(-0.5, 2)).toBe('-0.50%');
     expect(fmtPct(0, 2)).toBe('0.00%');
     expect(fmtPct(0.05, 1)).toBe('+0.1%');
+  });
+});
+
+describe('fmtPctAbs', () => {
+  it('без знака в обе стороны — направление уже сказано словами', () => {
+    expect(fmtPctAbs(1.2, 2)).toBe('1.20%');
+    expect(fmtPctAbs(-1.2, 2)).toBe('1.20%');
+    expect(fmtPctAbs(0, 2)).toBe('0.00%');
+  });
+
+  it('невалидные → «—»', () => {
+    expect(fmtPctAbs(null)).toBe('—');
+    expect(fmtPctAbs(NaN)).toBe('—');
   });
 });
 

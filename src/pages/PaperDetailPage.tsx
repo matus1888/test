@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { fetchKlines } from '../api/bybit';
@@ -8,19 +8,24 @@ import {
   closeLabel,
   evaluatePosition,
   eventLabel,
+  fillsFor,
   fmtDuration,
   fmtTime,
   liquidationPrice,
+  limitGap,
   settleOpen,
+  staleLimits,
   totalPnlOf,
   TP_FRACS,
   type PaperPosition,
 } from '../lib/paper';
-import { fmt, fmtCompact, fmtPct } from '../lib/format';
+import { fmt, fmtCompact, fmtPct, fmtPctAbs } from '../lib/format';
 import { effectiveCycleMs } from '../lib/klinePlan';
 import StrategyChart from '../components/StrategyChart';
 import Term from '../components/Term';
+import PairLink from '../components/PairLink';
 import type { TradePlan } from '../lib/tradePlan';
+import { useConfirm } from '../components/Confirm';
 
 /** Синтетический план из параметров входа — чтобы показать уровни на графике. */
 function planForChart(pos: PaperPosition, candlesHigh: number, candlesLow: number): TradePlan {
@@ -57,8 +62,15 @@ function planForChart(pos: PaperPosition, candlesHigh: number, candlesLow: numbe
 export default function PaperDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { positions, closeManual, settle, remove } = usePaperPositions();
+  const { positions, closeManual, settle, fill, cancelPending, remove } = usePaperPositions();
+  const [confirm, confirmDialog] = useConfirm();
   const pos = positions.find((p) => p.id === id);
+  // «Сколько в позиции / сколько заявка в рынке» — тик раз в минуту.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const i = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(i);
+  }, []);
 
   // Живая цена — из сокета (REST остаётся страховкой до первого кадра).
   const prices = useLivePrices(pos ? groupByCategory([pos]) : []);
@@ -77,13 +89,25 @@ export default function PaperDetailPage() {
 
   const candles = useMemo(() => klines.data ?? [], [klines.data]);
   const ev = pos ? evaluatePosition(pos, candles) : null;
+  // Живая цена: для переоценки нужна, но пока сокета нет — честнее «—», чем цена входа.
+  const livePrice = pos ? prices.get(`${pos.category}:${pos.symbol}`) ?? null : null;
+  const live = livePrice ?? pos?.entryPrice ?? 0;
 
-  // Материализация авто-закрытия
+  // Материализация исполнения лимита, снятия протухшей заявки и авто-закрытия.
+  // Пока заявка в рынке, позиции нет — и P&L на странице нулевой.
   useEffect(() => {
-    if (!pos || pos.status !== 'open' || candles.length === 0) return;
+    if (!pos) return;
+    if (pos.status === 'pending') {
+      // `now` по умолчанию берётся внутри движка: пока заявка висит, она либо
+      // исполнилась (по истории свечей или по живой цене), либо протухла.
+      fill(fillsFor([pos], () => candles, () => livePrice));
+      if (staleLimits([pos]).length > 0) cancelPending([{ id: pos.id, reason: 'stale' }]);
+      return;
+    }
+    if (pos.status !== 'open' || candles.length === 0) return;
     const info = settleOpen(pos, candles);
     if (info) settle([{ id: pos.id, info }]);
-  }, [pos, candles, settle]);
+  }, [pos, candles, livePrice, fill, cancelPending, settle]);
 
   if (!pos) {
     return (
@@ -94,10 +118,13 @@ export default function PaperDetailPage() {
     );
   }
 
-  const live = prices.get(`${pos.category}:${pos.symbol}`) ?? pos.entryPrice;
+  const isPending = pos.status === 'pending';
+  // Заявка без исполнения (висит или снята): позиции не было — ход цены не в счёт.
+  const noFill = isPending || pos.status === 'cancelled';
   const exit = pos.status === 'open' ? live : (pos.closePrice ?? pos.entryPrice);
   const r = totalPnlOf(pos, exit);
-  const exitTime = pos.status === 'open' ? Date.now() : (pos.closedAt ?? pos.openedAt);
+  const exitTime = pos.status === 'open' ? now : (pos.closedAt ?? pos.filledAt ?? pos.openedAt);
+  const startTime = pos.filledAt ?? pos.openedAt;
   const decimals = pos.entryPrice < 1 ? 5 : 2;
   // Оценка ликвидации для изолированной маржи. При плече 1× лонг
   // ликвидировать нельзя (0 — недостижимо), линию на графике не рисуем.
@@ -107,8 +134,24 @@ export default function PaperDetailPage() {
   const persistedLegs = new Set((pos.legs ?? []).map((l) => l.reason));
   const legText = (reason: 'tp1' | 'tp2', price: number, frac: number) =>
     `Частичный выход ${eventLabel(reason)} (${Math.round(frac * 100)}%) по ${fmt(price, decimals)}`;
+  const placedEvent = {
+    time: pos.openedAt,
+    text: `Заявка выставлена: лимит ${pos.direction === 'long' ? 'покупка' : 'продажа'} по ${fmt(pos.entryPrice, decimals)}`
+      + ` · риск ${fmt(pos.riskMoney ?? 0)} $ ×${pos.leverage} · позиции ещё нет`,
+  };
+  const fillEvent = {
+    time: startTime,
+    text: pos.entryKind === 'market'
+      ? `Вход по рынку: ${pos.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'} ${fmt(pos.entryPrice, decimals)} · `
+        + `исполнено сразу по текущей цене · риск ${fmt(pos.riskMoney ?? 0)} $ ×${pos.leverage}`
+      : `Вход по лимиту: ${pos.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'} ${fmt(pos.entryPrice, decimals)} · ставка ${fmt(pos.stake)} $ ×${pos.leverage}`,
+  };
   const timeline: { time: number; text: string }[] = [
-    { time: pos.openedAt, text: `Открыта: ${pos.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'} по ${fmt(pos.entryPrice, decimals)} · ставка ${fmt(pos.stake)} $ ×${pos.leverage}` },
+    // Пока заявка висит или снята — в ленте только постановка и снятие: входа не было.
+    // После исполнения видно оба события, если они не совпали по времени (обычно заявка
+    // стоит минуты, а потом задевается). Legacy-позиции: только вход, как раньше.
+    ...(noFill || (pos.filledAt != null && pos.filledAt > pos.openedAt) ? [placedEvent] : []),
+    ...(noFill ? [] : [fillEvent]),
     ...(pos.legs ?? []).map((l) => ({ time: l.time, text: legText(l.reason, l.price, l.frac) })),
     ...(ev?.events
       .filter((e) => !((e.type === 'tp1' || e.type === 'tp2') && persistedLegs.has(e.type)))
@@ -126,12 +169,26 @@ export default function PaperDetailPage() {
       })) ?? []),
   ];
   if (pos.status === 'closed') {
-    timeline.push({ time: pos.closedAt ?? pos.openedAt, text: `Закрыта (${closeLabel(pos.closeReason)}) по ${fmt(pos.closePrice ?? pos.entryPrice, decimals)}` });
+    timeline.push({ time: pos.closedAt ?? startTime, text: `Закрыта (${closeLabel(pos.closeReason)}) по ${fmt(pos.closePrice ?? pos.entryPrice, decimals)}` });
+  }
+  if (pos.status === 'cancelled') {
+    timeline.push({
+      time: pos.closedAt ?? pos.openedAt,
+      text: pos.cancelReason === 'stale'
+        ? 'Заявка снята: не исполнилась за 24 ч, сетап протух'
+        : 'Заявка снята вручную — сделки не было',
+    });
   }
   timeline.sort((a, b) => a.time - b.time);
 
-  const erase = () => {
-    if (window.confirm(`Удалить позицию ${pos.symbol} из журнала?`)) {
+  const erase = async () => {
+    const ok = await confirm({
+      title: 'Удалить запись?',
+      text: `Запись по ${pos.symbol} исчезнет из журнала.`,
+      ok: 'Удалить',
+      danger: true,
+    });
+    if (ok) {
       remove(pos.id);
       navigate('/paper');
     }
@@ -139,21 +196,34 @@ export default function PaperDetailPage() {
 
   return (
     <div className="page">
+      {confirmDialog}
       <Link to="/paper" className="back">← Назад к портфелю</Link>
       <header className="top">
         <div>
           <h1>
-            {pos.symbol} <span className={pos.direction === 'long' ? 'pos' : 'neg'}>{pos.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'}</span>{' '}
+            <PairLink symbol={pos.symbol} category={pos.category} withText />{' '}
+            <span className={pos.direction === 'long' ? 'pos' : 'neg'}>{pos.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'}</span>{' '}
             <span className="muted">· {pos.category} · {pos.interval}</span>
           </h1>
           <p className="sub">
-            {pos.status === 'open' ? 'Открыта' : `Закрыта · ${closeLabel(pos.closeReason)}`} · вход {fmtTime(pos.openedAt)}
+            {isPending
+              ? <>Заявка в рынке · лимит выставлен {fmtTime(pos.openedAt)}</>
+              : pos.status === 'cancelled'
+                ? <>Заявка снята без исполнения{pos.closedAt ? ` · ${fmtTime(pos.closedAt)}` : ''}</>
+                : pos.status === 'open'
+                  ? <>Открыта · {pos.entryKind === 'market' ? 'вход по рынку' : 'вход'} {fmtTime(startTime)}</>
+                  : <>Закрыта · {closeLabel(pos.closeReason)} · вход {fmtTime(startTime)}</>}
           </p>
         </div>
         <div className="controls">
           {pos.status === 'open' && (
             <button className="btn" onClick={() => closeManual(pos.id, live, Date.now())}>
               Закрыть по рынку ({fmt(live, decimals)})
+            </button>
+          )}
+          {isPending && (
+            <button className="btn" onClick={() => cancelPending([{ id: pos.id, reason: 'manual' }])}>
+              Снять заявку
             </button>
           )}
           <button className="btn btn-danger" onClick={erase}>Удалить</button>
@@ -163,7 +233,31 @@ export default function PaperDetailPage() {
       <section className="cards">
         <div className="card">
           <h3><Term t="position" label="Вход" /></h3>
-          <div className="lvl"><span>Цена</span><b>{fmt(pos.entryPrice, decimals)}</b></div>
+          <div className="lvl">
+            <span>{pos.entryKind === 'market' ? 'Цена входа (рынок)' : 'Цена лимита'}</span>
+            <b>{fmt(pos.entryPrice, decimals)}</b>
+          </div>
+          {pos.entryKind === 'market' && (
+            <p className="state">
+              Исполнено сразу по текущей котировке, без ожидания отката. Проскальзывание в бумаге
+              не учитывается: на бирже реальная цена входа была бы чуть хуже.
+            </p>
+          )}
+          {isPending && (
+            <div className="lvl">
+              <span>Цена сейчас</span>
+              <b>
+                {livePrice == null ? '—' : (
+                  <>
+                    {fmt(livePrice, decimals)}{' '}
+                    <span className="muted">
+                      (до лимита {fmtPctAbs(limitGap(pos, livePrice) * 100, 2)} {pos.direction === 'long' ? 'ниже' : 'выше'})
+                    </span>
+                  </>
+                )}
+              </b>
+            </div>
+          )}
           <div className="lvl"><span><Term t="stake" label="Ставка" /></span><b>{fmt(pos.stake)} $</b></div>
           <div className="lvl"><span><Term t="leverage" label="Плечо" /></span><b>×{pos.leverage}</b></div>
           <div className="lvl"><span><Term t="qty" label="Количество" /></span><b>{fmt(pos.qty, 4)}</b></div>
@@ -171,18 +265,44 @@ export default function PaperDetailPage() {
         </div>
         <div className="card">
           <h3><Term t="pnl" label="Итог" /></h3>
-          <div className="lvl"><span>{pos.status === 'open' ? 'Текущая цена' : 'Цена выхода'}</span><b>{fmt(exit, decimals)}</b></div>
-          <div className="lvl"><span>P&L, $</span><b className={r.pnl > 0 ? 'pos' : r.pnl < 0 ? 'neg' : ''}>{r.pnl >= 0 ? '+' : ''}{fmt(r.pnl)}</b></div>
-          {(pos.legs ?? []).length > 0 && (
-            <div className="lvl"><span>Зафиксировано частями</span><b className="pos">+{fmt(r.booked)}</b></div>
+          {isPending ? (
+            <>
+              <div className="lvl"><span>Позиция</span><b>ещё не открыта</b></div>
+              <div className="lvl"><span>Заявка в рынке</span><b>{fmtDuration(now - pos.openedAt)}</b></div>
+              <div className="lvl"><span>P&L</span><b className="muted">0 $ — сделки не было</b></div>
+              <p className="state">
+                Заявка ждёт касания лимита {fmt(pos.entryPrice, decimals)}. До этого момента движения цены не входят
+                в результат: так бумага повторяет биржевую механику, где позиции тоже ещё нет.
+              </p>
+            </>
+          ) : pos.status === 'cancelled' ? (
+            <>
+              <div className="lvl"><span>Позиция</span><b>не открывалась</b></div>
+              <div className="lvl"><span>Заявка висела</span><b>{fmtDuration((pos.closedAt ?? pos.openedAt) - pos.openedAt)}</b></div>
+              <div className="lvl"><span>P&L</span><b className="muted">0 $ — сделки не было</b></div>
+              <p className="state">
+                Заявка по {fmt(pos.entryPrice, decimals)} снята {pos.cancelReason === 'stale'
+                  ? 'сама: за 24 часа лимит не задели, сетап протух'
+                  : 'вручную, не дожидаясь касания'}
+                . Комиссии нет — на бирже заявку без исполнения тоже не списывают.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="lvl"><span>{pos.status === 'open' ? 'Текущая цена' : 'Цена выхода'}</span><b>{fmt(exit, decimals)}</b></div>
+              <div className="lvl"><span>P&L, $</span><b className={r.pnl > 0 ? 'pos' : r.pnl < 0 ? 'neg' : ''}>{r.pnl >= 0 ? '+' : ''}{fmt(r.pnl)}</b></div>
+              {(pos.legs ?? []).length > 0 && (
+                <div className="lvl"><span>Зафиксировано частями</span><b className="pos">+{fmt(r.booked)}</b></div>
+              )}
+              <div className="lvl"><span><Term t="fee" label="Комиссия ~" /></span><b>−{fmt(r.fee)}</b></div>
+              <div className="lvl"><span>P&L net, $</span><b className={r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : ''}>{r.net >= 0 ? '+' : ''}{fmt(r.net)}</b></div>
+              <div className="lvl"><span><Term t="margin" label="P&L net, % к марже" /></span><b>{fmtPct(r.netMarginPct, 1)}</b></div>
+              <div className="lvl"><span>P&L net, % к ставке</span><b>{fmtPct(r.netPct, 1)}</b></div>
+              <div className="lvl"><span><Term t="rMultiple" label="R-мультипл net" /></span><b>{fmt(r.netR, 2)}R</b></div>
+              <div className="lvl"><span><Term t="holding" label="Время в позиции" /></span><b>{fmtDuration(exitTime - startTime)}</b></div>
+              <div className="lvl"><span><Term t="notional" label="Номинал / маржа" /></span><b>{fmtCompact(r.notional)} $ / {fmt(r.margin)} $</b></div>
+            </>
           )}
-          <div className="lvl"><span><Term t="fee" label="Комиссия ~" /></span><b>−{fmt(r.fee)}</b></div>
-          <div className="lvl"><span>P&L net, $</span><b className={r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : ''}>{r.net >= 0 ? '+' : ''}{fmt(r.net)}</b></div>
-          <div className="lvl"><span><Term t="margin" label="P&L net, % к марже" /></span><b>{fmtPct(r.netMarginPct, 1)}</b></div>
-          <div className="lvl"><span>P&L net, % к ставке</span><b>{fmtPct(r.netPct, 1)}</b></div>
-          <div className="lvl"><span><Term t="rMultiple" label="R-мультипл net" /></span><b>{fmt(r.netR, 2)}R</b></div>
-          <div className="lvl"><span><Term t="holding" label="Время в позиции" /></span><b>{fmtDuration(exitTime - pos.openedAt)}</b></div>
-          <div className="lvl"><span><Term t="notional" label="Номинал / маржа" /></span><b>{fmtCompact(r.notional)} $ / {fmt(r.margin)} $</b></div>
         </div>
         <div className="card">
           <h3>Уровни плана</h3>
@@ -207,9 +327,9 @@ export default function PaperDetailPage() {
         </div>
         <div className="card">
           <h3>Движение цены</h3>
-          <div className="lvl"><span>MFE</span><b className="pos">{ev ? fmt(ev.mfeR, 1) : '…'}R</b></div>
-          <div className="lvl"><span>MAE</span><b className="neg">{ev ? fmt(ev.maeR, 1) : '…'}R</b></div>
-          <p className="state">MFE — лучший ход в твою пользу, MAE — худшая просадка, в единицах риска.</p>
+          <div className="lvl"><span>MFE</span><b className="pos">{!noFill && ev ? fmt(ev.mfeR, 1) : '—'}{noFill ? '' : 'R'}</b></div>
+          <div className="lvl"><span>MAE</span><b className="neg">{!noFill && ev ? fmt(ev.maeR, 1) : '—'}{noFill ? '' : 'R'}</b></div>
+          <p className="state">MFE — лучший ход в твою пользу, MAE — худшая просадка, в единицах риска. Считаются от момента исполнения лимита.</p>
           {ev?.partial && <p className="state">История свечей короче жизни позиции — ранние события могли не попасть в разбор.</p>}
         </div>
       </section>
@@ -219,7 +339,12 @@ export default function PaperDetailPage() {
           candles={candles}
           plan={planForChart(pos, Math.max(...candles.map((c) => c.high)), Math.min(...candles.map((c) => c.low)))}
           markers={[
-            { time: pos.openedAt, label: 'Вход', color: '#3b82f6' },
+            isPending
+              ? { time: pos.openedAt, label: 'Лимит', color: '#3b82f6' }
+              : pos.status === 'cancelled'
+                // Снятой заявке показываем, сколько она висела в рынке: точки входа не было.
+                ? { time: pos.closedAt ?? pos.openedAt, label: 'Снята', color: '#94a3b8' }
+                : { time: startTime, label: 'Вход', color: '#3b82f6' },
             ...(pos.status === 'closed' && pos.closedAt != null
               ? [{ time: pos.closedAt, label: 'Выход', color: '#f59e0b' }]
               : []),
@@ -239,7 +364,7 @@ export default function PaperDetailPage() {
       </section>
 
       <footer className="foot">
-        Номинал позиции: {fmtCompact(pos.qty * pos.entryPrice)}. P&L в $ = движение цены × количество и не зависит от плеча; проценты — к марже (номинал/плечо). Линия LIQ — оценка ликвидации для изолированной маржи, не точная цена биржи. TP1 фиксирует 70%, TP2 — 20%, после TP1 стоп в безубытке.
+        Номинал позиции: {fmtCompact(pos.qty * pos.entryPrice)}. P&L в $ = движение цены × количество и не зависит от плеча; проценты — к марже (номинал/плечо). Линия LIQ — оценка ликвидации для изолированной маржи, не точная цена биржи. TP1 фиксирует 70%, TP2 — 20%, после TP1 стоп в безубытке. Вход — лимит по середине зоны: позиция и её P&L появляются только после касания лимита.
       </footer>
     </div>
   );

@@ -5,7 +5,9 @@ import { closeAllReal } from '../api/live';
 import { fmt, fmtCompact } from '../lib/format';
 import { setupCls } from '../lib/ui';
 import Term from './Term';
+import PairLink from './PairLink';
 import WsBadge from './WsBadge';
+import { useConfirm } from './Confirm';
 
 /** Цена символа: у дорогих монет копейки, у дешёвых — знаки после запятой. */
 const pxFmt = (v: number) => (v >= 1000 ? fmt(v, 2) : v >= 1 ? fmt(v, 4) : fmt(v, 6));
@@ -33,14 +35,19 @@ interface Props {
 export default function RealAccountView({ api }: Props) {
   const [closing, setClosing] = useState(false);
   const [closeMsg, setCloseMsg] = useState<string | null>(null);
+  const [confirm, confirmDialog] = useConfirm();
 
   const doCloseAll = async () => {
     const cred = api.cred;
     if (!cred || api.account == null || api.account.positions.length === 0) return;
     const n = api.account.positions.length;
-    if (!window.confirm(
-      `Закрыть все позиции (${n}) рыночными ордерами?\n\nЭто настоящие ордера на ${api.testnet ? 'тестнет' : 'мейннет'} Bybit.`,
-    )) return;
+    const ok = await confirm({
+      title: 'Закрыть все позиции рыночными ордерами?',
+      text: `Позиций: ${n}. Это настоящие ордера на ${api.testnet ? 'тестнет' : 'мейннет'} Bybit.`,
+      ok: 'Закрыть всё',
+      danger: true,
+    });
+    if (!ok) return;
     setClosing(true);
     setCloseMsg(null);
     try {
@@ -85,6 +92,7 @@ export default function RealAccountView({ api }: Props) {
 
   return (
     <>
+      {confirmDialog}
       <section className="cards">
         <div className="card">
           <h3>Капитал Bybit</h3>
@@ -125,11 +133,8 @@ export default function RealAccountView({ api }: Props) {
 
       <div className="detail-head">
         <h2>Позиции Bybit</h2>
-        {/* TODO(crash): «Закрыть все» на /real роняет вкладку после confirm
-            (подозрение: бесконечный ре-рендер при опустошении портфеля/сокетов),
-            затем вернуть в работу и добавить e2e-проверку. Временно disabled. */}
         {positions.length > 0 && (
-          <button className="btn btn-sm btn-close-all" disabled onClick={() => void doCloseAll()}>
+          <button className="btn btn-sm btn-close-all" disabled={closing} onClick={() => void doCloseAll()}>
             {closing ? 'Закрываем…' : 'Закрыть все'}
           </button>
         )}
@@ -157,7 +162,7 @@ export default function RealAccountView({ api }: Props) {
             <tbody>
               {positions.map((p) => (
                 <tr key={`${p.symbol}-${p.positionIdx}`}>
-                  <td className="sym">{p.symbol}</td>
+                  <td className="sym"><PairLink symbol={p.symbol} category="linear" /></td>
                   <td className={setupCls(p.side === 'Buy' ? 'long' : 'short')}>{p.side === 'Buy' ? 'ЛОНГ' : 'ШОРТ'}</td>
                   <td>{fmt(p.size, 4)}</td>
                   <td>{pxFmt(p.avgPrice)}</td>
@@ -200,7 +205,7 @@ export default function RealAccountView({ api }: Props) {
             <tbody>
               {orders.map((o) => (
                 <tr key={o.orderId}>
-                  <td className="sym">{o.symbol}</td>
+                  <td className="sym"><PairLink symbol={o.symbol} category="linear" /></td>
                   <td className={setupCls(o.side === 'Buy' ? 'long' : 'short')}>{o.side === 'Buy' ? 'ПОКУПКА' : 'ПРОДАЖА'}</td>
                   <td>{ORD_TYPES[o.orderType] ?? o.orderType}</td>
                   <td>{fmt(o.qty, 4)}</td>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useQueries } from '@tanstack/react-query';
 import { fetchKlines, type Candle } from '../api/bybit';
@@ -8,17 +8,24 @@ import {
   closeLabel,
   evaluatePosition,
   eventLabel,
+  fillsFor,
+  fmtDuration,
   fmtTime,
+  limitGap,
+  pendingMargin,
   settleOpen,
+  staleLimits,
   totalPnlOf,
   type PaperPosition,
 } from '../lib/paper';
 import { candleKey, effectiveCycleMs } from '../lib/klinePlan';
-import { fmt, fmtCompact, fmtPct } from '../lib/format';
+import { fmt, fmtCompact, fmtPct, fmtPctAbs } from '../lib/format';
 import { rowKeyProps, setupCls } from '../lib/ui';
 import Term from '../components/Term';
+import PairLink from '../components/PairLink';
 import EnvBadge from '../components/EnvBadge';
 import PaperAnalytics from '../components/PaperAnalytics';
+import { useConfirm } from '../components/Confirm';
 import { useSessionState } from '../hooks/useSessionState';
 
 function isPositiveNumber(v: unknown): v is number {
@@ -27,7 +34,14 @@ function isPositiveNumber(v: unknown): v is number {
 
 export default function PaperPage() {
   const navigate = useNavigate();
-  const { positions, settle, remove, closeManual, closeAll } = usePaperPositions();
+  const [confirm, confirmDialog] = useConfirm();
+  const { positions, settle, fill, cancelPending, remove, closeManual, closeAll } = usePaperPositions();
+  // «Сколько заявка в рынке» — тик раз в минуту: дёшево, а возраст виден сразу.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const i = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(i);
+  }, []);
 
   // Свечи по каждой позиции — для авто-закрытий и колонки «что сработало».
   // Ключи дедуплицируются: две позиции по одному символу и ТФ — это один запрос,
@@ -61,20 +75,35 @@ export default function PaperPage() {
     },
   });
 
-  // Материализация авто-закрытий (стоп/TP3) в localStorage
+  const open = positions.filter((p) => p.status === 'open');
+  const pending = positions.filter((p) => p.status === 'pending');
+  const closed = positions.filter((p) => p.status === 'closed');
+  // Живые цены нужны и открытым (переоценка), и заявкам в рынке (проверка касания лимита).
+  const prices = useLivePrices(groupByCategory([...open, ...pending]));
+
+  const liveOf = useCallback((p: PaperPosition) => prices.get(`${p.category}:${p.symbol}`) ?? null, [prices]);
+  const candlesOf = useCallback(
+    (p: PaperPosition) => candlesByPos.get(candleKey(p.category, p.symbol, p.interval)),
+    [candlesByPos],
+  );
+
+  // Материализация заявок (исполнение лимита, снятие протухших) и авто-закрытий
+  // (стоп/безубыток/TP3) в localStorage. Пишет только при реальном переходе
+  // статуса, поэтому пересчёт на каждом тике цен ничего не меняет в покое.
   useEffect(() => {
+    // `now` по умолчанию берётся внутри движка: заявка либо уже задела лимит
+    // (по истории свечей или по живой цене), либо протухла по TTL.
+    fill(fillsFor(positions, candlesOf, liveOf));
+    const stale = staleLimits(positions);
+    if (stale.length > 0) cancelPending(stale);
     const list: { id: string; info: NonNullable<ReturnType<typeof settleOpen>> }[] = [];
     for (const p of positions) {
       if (p.status !== 'open') continue;
-      const info = settleOpen(p, candlesByPos.get(candleKey(p.category, p.symbol, p.interval)));
+      const info = settleOpen(p, candlesOf(p));
       if (info) list.push({ id: p.id, info });
     }
     if (list.length > 0) settle(list);
-  }, [positions, candlesByPos, settle]);
-
-  const open = positions.filter((p) => p.status === 'open');
-  const closed = positions.filter((p) => p.status === 'closed');
-  const prices = useLivePrices(groupByCategory(open));
+  }, [positions, candlesOf, liveOf, fill, cancelPending, settle]);
 
   // Качество закрытых: средний R и доля достигавших TP1 (по доступной истории свечей).
   let rSum = 0;
@@ -90,11 +119,13 @@ export default function PaperPage() {
   const priceOf = (p: (typeof positions)[number]) =>
     p.status === 'open' ? (prices.get(`${p.category}:${p.symbol}`) ?? p.entryPrice) : (p.closePrice ?? p.entryPrice);
 
-  const totals = positions.map((p) => totalPnlOf(p, priceOf(p)).net);
+  // В зачёт портфеля идут только исполненные сделки: заявка в рынке — это ноль.
+  const traded = positions.filter((p) => p.status === 'open' || p.status === 'closed');
+  const totals = traded.map((p) => totalPnlOf(p, priceOf(p)).net);
   const total = totals.reduce((a, b) => a + b, 0);
   let stakeSum = 0;
   let marginSum = 0;
-  for (const p of positions) {
+  for (const p of traded) {
     const r = totalPnlOf(p, priceOf(p));
     stakeSum += p.stake;
     marginSum += r.margin;
@@ -110,14 +141,18 @@ export default function PaperPage() {
     openNotional += r.notional;
   }
   const deposit = useSessionState<number>('symbol:deposit', 1000, isPositiveNumber)[0];
+  const pendingMarginSum = pendingMargin(positions);
 
-  const erase = (e: React.MouseEvent, id: string, symbol: string) => {
+  const erase = async (e: React.MouseEvent, id: string, symbol: string) => {
     e.stopPropagation();
-    if (window.confirm(`Удалить позицию ${symbol} из журнала?`)) remove(id);
+    if (await confirm({ title: 'Удалить запись?', text: `Запись по ${symbol} исчезнет из журнала.`, ok: 'Удалить', danger: true })) {
+      remove(id);
+    }
   };
 
   return (
     <div className="page">
+      {confirmDialog}
       <Link to="/" className="back">← Назад к скринеру</Link>
       <header className="top">
         <div>
@@ -145,10 +180,17 @@ export default function PaperPage() {
           <h3><Term t="position" label="Позиции" /></h3>
           <div className="lvl"><span>Открыто</span><b>{open.length}</b></div>
           <div className="lvl"><span>Закрыто</span><b>{closed.length}</b></div>
+          <div className="lvl"><span><Term t="limitOrder" label="Лимитов в рынке" /></span><b>{pending.length}</b></div>
           <div className="lvl">
             <span><Term t="margin" label="Занято из депозита" /></span>
             <b>{open.length > 0 ? `${fmt(openMargin)} $ · ${fmtPct((openMargin / deposit) * 100, 0)}` : '—'}</b>
           </div>
+          {pending.length > 0 && (
+            <div className="lvl">
+              <span className="muted">В резерве под лимиты</span>
+              <b className="muted">{fmt(pendingMarginSum)} $</b>
+            </div>
+          )}
           <div className="lvl">
             <span>Торговый номинал</span>
             <b className="muted">{open.length > 0 ? `${fmtCompact(openNotional)} $ (×${(openNotional / Math.max(openMargin, 1)).toFixed(1)} к марже)` : '—'}</b>
@@ -162,22 +204,25 @@ export default function PaperPage() {
       </section>
 
       {positions.length === 0 ? (
-        <p className="state">Пока нет бумажных позиций. Открой первую со страницы символа — кнопка под торговым планом.</p>
+        <p className="state">Пока нет бумажных заявок. Поставь первую со страницы символа — кнопка под торговым планом.</p>
       ) : (
         <>
           {open.length > 0 && (
             <div className="table-actions">
-              {/* TODO(crash): «Закрыть все» роняет вкладку после confirm — разобраться
-                  (подозрение: бесконечный ре-рендер при опустошении портфеля/сокетов),
-                  затем вернуть в работу и добавить e2e-проверку. Кнопка временно disabled. */}
+              {/* Раньше кнопка была disabled: нативный confirm ронял вкладку после
+                  accept. С подтверждением внутри приложения (components/Confirm.tsx)
+                  нативного диалога здесь нет — падать нечему. */}
               <button
                 className="btn btn-sm btn-close-all"
-                disabled
-                onClick={() => {
-                  if (!window.confirm(`Закрыть все открытые позиции (${open.length}) по текущим ценам?`)) return;
-                  closeAll(priceOf);
+                onClick={async () => {
+                  const ok = await confirm({
+                    title: 'Закрыть все позиции?',
+                    text: `Открытых позиций: ${open.length}. Закрытие по текущим ценам.\nЗаявки в рынке не задеты — они снимаются.`,
+                    ok: 'Закрыть всё',
+                    danger: true,
+                  });
+                  if (ok) closeAll(priceOf);
                 }}
-                title="Временно отключено: закрытие всех роняет страницу — идёт разбор причины"
               >Закрыть все</button>
             </div>
           )}
@@ -197,6 +242,7 @@ export default function PaperPage() {
             </thead>
             <tbody>
               {positions.map((p) => {
+                const isPending = p.status === 'pending';
                 const exit = priceOf(p);
                 const r = totalPnlOf(p, exit);
                 const ev = evaluatePosition(p, candlesByPos.get(candleKey(p.category, p.symbol, p.interval)) ?? []);
@@ -205,14 +251,47 @@ export default function PaperPage() {
                   ...ev.events.filter((e) => e.type === 'tp1' || e.type === 'tp2' || e.type === 'tp3').map((e) => e.type),
                 ]);
                 const tps = [...reached].map((t) => eventLabel(t as 'tp1' | 'tp2' | 'tp3'));
+                // Для заявки в рынке показываем, сколько ещё не хватает цене до лимита.
+                const live = liveOf(p);
+                const gap = isPending && live != null ? limitGap(p, live) : 0;
                 return (
                   <tr key={p.id} {...rowKeyProps(() => navigate(`/paper/${p.id}`), `Разбор позиции ${p.symbol}`)}>
-                    <td className="sym">{p.symbol}<br /><span className="muted">{p.category} · {p.interval}</span></td>
+                    <td className="sym">
+                      <PairLink symbol={p.symbol} category={p.category} /><br />
+                      <span className="muted">{p.category} · {p.interval}</span>
+                    </td>
                     <td className={setupCls(p.direction)}>{p.direction === 'long' ? 'ЛОНГ' : 'ШОРТ'}</td>
-                    <td>{fmt(p.entryPrice, 4)}<br /><span className="muted">{fmtTime(p.openedAt)}</span></td>
-                    <td>{fmt(exit, 4)}</td>
+                    <td>
+                      {fmt(p.entryPrice, 4)}
+                      <br />
+                      <span className="muted">
+                        {isPending
+                          ? `лимит · ${fmtTime(p.openedAt)}`
+                          : p.status === 'cancelled'
+                            ? `заявка · ${fmtTime(p.openedAt)}`
+                            : `${p.entryKind === 'market' ? 'рынок' : 'лимит'} · ${fmtTime(p.filledAt ?? p.openedAt)}`}
+                      </span>
+                    </td>
+                    <td>
+                      {isPending ? (
+                        <>
+                          <span className="muted">цена {live == null ? '—' : fmt(live, 4)}</span>
+                          <br />
+                          <span className="muted">
+                            {live == null
+                              ? 'ждём котировку'
+                              : gap > 0
+                                ? `до лимита ${fmtPctAbs(gap * 100, 2)} ${p.direction === 'long' ? 'ниже' : 'выше'}`
+                                : 'лимит в рынке'}
+                          </span>
+                        </>
+                      ) : p.status === 'cancelled' ? (
+                        <span className="muted">—</span>
+                      ) : fmt(exit, 4)}
+                    </td>
                     <td>
                       <b>{fmt(r.margin)} $</b>
+                      {(isPending || p.status === 'cancelled') && <span className="muted"> (при исполнении)</span>}
                       <br />
                       <span className="muted">
                         номинал {fmtCompact(r.notional)} $ · ×{p.leverage}
@@ -221,12 +300,35 @@ export default function PaperPage() {
                       </span>
                     </td>
                     <td className={r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : ''}>
-                      {r.net >= 0 ? '+' : ''}{fmt(r.net)} $ ({fmtPct(r.netMarginPct, 1)})
+                      {isPending || p.status === 'cancelled' ? (
+                        <span className="muted">{isPending ? 'нет позиции' : 'сделок не было'}</span>
+                      ) : (
+                        <>
+                          {r.net >= 0 ? '+' : ''}{fmt(r.net)} $ ({fmtPct(r.netMarginPct, 1)})
+                        </>
+                      )}
                     </td>
                     <td>
-                      {p.status === 'open'
-                        ? <>Открыта{tps.length > 0 ? ` · ${[...new Set(tps)].join(', ')}` : ''}</>
-                        : `Закрыта · ${closeLabel(p.closeReason)}`}
+                      {isPending && (
+                        <>
+                          Лимит в рынке
+                          <br />
+                          <span className="muted">в рынке {fmtDuration(now - p.openedAt)}</span>
+                        </>
+                      )}
+                      {!isPending && p.status === 'open' && (
+                        <>Открыта{tps.length > 0 ? ` · ${[...new Set(tps)].join(', ')}` : ''}</>
+                      )}
+                      {p.status === 'closed' && <>Закрыта · {closeLabel(p.closeReason)}</>}
+                      {p.status === 'cancelled' && (
+                        <>
+                          Заявка снята{p.cancelReason === 'stale' ? ' · протухла' : ''}
+                          <br />
+                          <span className="muted">
+                            висела {fmtDuration((p.closedAt ?? p.openedAt) - p.openedAt)}
+                          </span>
+                        </>
+                      )}
                     </td>
                     <td>
                       {p.status === 'open' && (
@@ -235,6 +337,13 @@ export default function PaperPage() {
                           onClick={(e) => { e.stopPropagation(); closeManual(p.id, exit, Date.now()); }}
                           title={`Закрыть по текущей цене ${fmt(exit, 4)}`}
                         >Закрыть</button>
+                      )}
+                      {isPending && (
+                        <button
+                          className="btn btn-sm"
+                          onClick={(e) => { e.stopPropagation(); cancelPending([{ id: p.id, reason: 'manual' }]); }}
+                          title="Снять заявку, не дожидаясь касания лимита"
+                        >Снять</button>
                       )}
                       <button className="btn btn-sm" onClick={(e) => erase(e, p.id, p.symbol)}>✕</button>
                     </td>
@@ -250,7 +359,12 @@ export default function PaperPage() {
       <PaperAnalytics closed={closed.filter((p) => p.status === 'closed')} />
 
       <footer className="foot">
-        Открытые позиции переоцениваются по живым тикерам. TP1 фиксирует 70% позиции, TP2 — ещё 20%, остаток идёт до TP3; после TP1 стоп переносится в безубыток. P&L показан чистыми — за вычетом комиссии за круг (тейкер). P&L в $ = движение цены × количество и не зависит от плеча; проценты — к марже (номинал/плечо) и к ставке. Клик по строке — детальный разбор.
+        Вход — это лимитная заявка по середине зоны, а не позиция: пока цена не дошла до лимита, сделки нет и P&L нулевой
+        (иначе бумага рисовала бы «мгновенную прибыль», которой на бирже не бывает). Исполнение наступает, когда цена
+        доходит до лимита; неисполненная заявка снимается вручную или сама через 24 ч. Открытые позиции переоцениваются
+        по живым тикерам. TP1 фиксирует 70% позиции, TP2 — ещё 20%, остаток идёт до TP3; после TP1 стоп переносится в
+        безубыток. P&L показан чистыми — за вычетом комиссии за круг (тейкер). P&L в $ = движение цены × количество и
+        не зависит от плеча; проценты — к марже (номинал/плечо) и к ставке. Клик по строке — детальный разбор.
       </footer>
     </div>
   );

@@ -172,6 +172,18 @@ td.sym { font-weight: 600; }
 .icon { vertical-align: -2px; }
 .ext { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; text-decoration: none; }
 .ext:hover { color: #fff; }
+/* Ссылка на биржу рядом с парой: сам символ идёт в ссылку, значок приглушён,
+   чтобы строка таблицы не выглядела «украшенной». Инлайн, а не flex, — чтобы в тексте
+   заголовка была настоящий пробел между символом и подписью «на бирже». */
+.pair-link {
+  color: inherit; text-decoration: none; white-space: nowrap;
+  border-bottom: 1px dotted transparent;
+}
+.pair-link .icon { margin-left: 3px; opacity: 0.45; }
+.pair-link:hover, .pair-link:focus-visible { color: #fff; border-bottom-color: currentColor; }
+.pair-link:hover .icon, .pair-link:focus-visible .icon { opacity: 1; }
+.pair-link .pair-link-note { margin-left: 4px; color: var(--muted); font-size: 12px; font-weight: 400; }
+.pair-link:hover .pair-link-note { color: #fff; }
 .quick-trade {
   position: sticky; top: 0; z-index: 200;
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
@@ -193,6 +205,25 @@ td.sym { font-weight: 600; }
 .open-short { border-color: var(--neg); }
 .btn-danger { border-color: var(--neg); }
 .btn-danger:hover { border-color: var(--neg); background: rgba(239, 83, 80, 0.12); }
+.btn-ok { border-color: var(--accent); background: rgba(56, 189, 248, 0.12); font-weight: 700; }
+.btn-ok:hover { border-color: var(--accent); background: rgba(56, 189, 248, 0.2); }
+/* Подтверждение внутри приложения (components/Confirm.tsx) */
+.cf-panel { max-width: 460px; }
+.cf-text { min-height: 0; white-space: pre-line; margin-bottom: 16px; }
+.cf-actions { justify-content: flex-end; }
+.wt-text-tight { min-height: 0; margin-bottom: 0; }
+
+/* Вход по рынку: заметно слабее лимитной кнопки — это осознанный платы за отказ
+   от ожидания отката, и по виду это должно читаться сразу. */
+.quick-open-market { color: var(--muted); border-style: dashed; }
+.quick-open-market:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.quick-entry-market { border-style: dashed; color: var(--muted); }
+.quick-entry-market:hover { border-color: var(--accent); color: var(--text); }
+.quick-entry-market.real { border-style: dashed; }
+
+/* PWA: кнопка установки в шапке + подсказка под ней. */
+.api-link .icon { margin-right: 3px; }
+.install-hint { font-size: 12px; max-width: 190px; line-height: 1.35; }
 .timeline { margin: 0; padding-left: 18px; font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
 .setup-long { color: var(--pos); font-weight: 700; }
 .setup-short { color: var(--neg); font-weight: 700; }

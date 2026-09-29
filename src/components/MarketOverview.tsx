@@ -13,6 +13,7 @@ import {
 import { hiddenReasonsCount, type HiddenPair } from '../lib/pairFilter';
 import { priorityOf, type Row } from '../lib/screener';
 import Term from './Term';
+import PairLink from './PairLink';
 
 const VERDICT_CLS: Record<RegimeVerdict, string> = {
   go: 'mo-verdict go',
@@ -21,7 +22,7 @@ const VERDICT_CLS: Record<RegimeVerdict, string> = {
   'no-data': 'mo-verdict',
 };
 
-function TopList({ title, rows, cls }: { title: string; rows: Row[]; cls?: string }) {
+function TopList({ title, rows, category, cls }: { title: string; rows: Row[]; category: Category; cls?: string }) {
   return (
     <div>
       <b className={cls}><Term t="priority" label={title} /></b>
@@ -31,7 +32,7 @@ function TopList({ title, rows, cls }: { title: string; rows: Row[]; cls?: strin
           <ul>
             {rows.map((r) => (
               <li key={r.symbol}>
-                <b>{r.symbol}</b>
+                <b><PairLink symbol={r.symbol} category={category} /></b>
                 <span className="muted">
                   {' '}· уверенность {r.confidence ?? 0}% · приоритет {priorityOf(r)} · ATR {fmt(r.m?.atrPct)}%
                 </span>
@@ -139,8 +140,8 @@ export default function MarketOverview({
             </div>
 
             <div className="mo-lists">
-              <TopList title="Лучшие лонги" rows={sum.strongLongs} cls="pos" />
-              <TopList title="Лучшие шорты" rows={sum.strongShorts} cls={shortsHeavy ? 'neg' : undefined} />
+              <TopList title="Лучшие лонги" rows={sum.strongLongs} category={category} cls="pos" />
+              <TopList title="Лучшие шорты" rows={sum.strongShorts} category={category} cls={shortsHeavy ? 'neg' : undefined} />
             </div>
 
             <ul className="mo-reasons">

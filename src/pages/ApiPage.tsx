@@ -11,6 +11,7 @@ import { useApiAccount } from '../hooks/useApiAccount';
 import { useSessionState } from '../hooks/useSessionState';
 import { fmt, fmtCompact } from '../lib/format';
 import Term from '../components/Term';
+import PairLink from '../components/PairLink';
 
 const MAX_COINS = 8;
 
@@ -201,7 +202,7 @@ export default function ApiPage() {
                   <tbody>
                     {info.positions.map((p) => (
                       <tr key={`${p.symbol}-${p.positionIdx}`}>
-                        <td className="sym">{p.symbol}</td>
+                        <td className="sym"><PairLink symbol={p.symbol} category="linear" /></td>
                         <td className={p.side === 'Buy' ? 'pos' : 'neg'}>{p.side === 'Buy' ? 'ЛОНГ' : 'ШОРТ'}</td>
                         <td>{p.size}</td>
                         <td>{fmt(p.avgPrice, p.avgPrice < 1 ? 5 : 4)}</td>

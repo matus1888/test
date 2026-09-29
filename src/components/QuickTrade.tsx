@@ -22,9 +22,16 @@ interface Props {
   riskMoney: number;
   marginNeeded: number;
   blockReason: string | null;
+  /** Цена входа по рынку (текущая котировка) и маржа под него. */
+  marketPrice?: number;
+  marketMargin?: number;
+  /** Причина, по которой вход по рынку сейчас невозможен (нет цены, дубль, лимиты). */
+  marketBlockReason?: string | null;
   liq?: number | null;
   liqRatio?: number | null;
   onOpen: () => void;
+  /** Вход по рынку вместо лимита: исполнение сразу, без ожидания отката. */
+  onOpenMarket?: () => void;
   /** Куда ведёт кнопка входа: бумажная позиция или форма реального ордера (/live). */
   realHref?: string;
 }
@@ -32,7 +39,8 @@ interface Props {
 /** Быстрый вход в один клик: риск в $, ставка/плечо, кнопка. Липкая, висит над графиком при скролле. */
 export default function QuickTrade({
   direction, entryPrice, decimals, stake, setStake, lev, setLev, qty,
-  deposit, riskPct, setRiskPct, riskMoney, marginNeeded, blockReason, liq, liqRatio, onOpen, realHref,
+  deposit, riskPct, setRiskPct, riskMoney, marginNeeded, blockReason,
+  marketPrice = 0, marketMargin = 0, marketBlockReason, liq, liqRatio, onOpen, onOpenMarket, realHref,
 }: Props) {
   const long = direction === 'long';
   const real = realHref != null;
@@ -85,14 +93,35 @@ export default function QuickTrade({
           <PlusIcon /> Реальный ордер →
         </Link>
       ) : (
-        <button className={`btn ${long ? 'open-long' : 'open-short'}`} onClick={onOpen} disabled={blockReason != null}>
-          <PlusIcon /> Открыть (бумага)
-        </button>
+        <>
+          <button className={`btn ${long ? 'open-long' : 'open-short'}`} onClick={onOpen} disabled={blockReason != null}>
+            <PlusIcon /> Открыть (бумага)
+          </button>
+          {/* Второй вход — сразу по текущей цене, без ожидания отката к лимиту. */}
+          <button
+            className="btn quick-open-market"
+            onClick={onOpenMarket}
+            disabled={!onOpenMarket || marketBlockReason != null}
+            title={
+              marketBlockReason ?? 'Исполнение сразу по текущей цене, без ожидания отката. В бумаге проскальзывание не учитывается'
+            }
+          >
+            <PlusIcon /> <Term t="marketEntry" label="По рынку" />
+          </button>
+        </>
       )}
       {real ? (
         <span className="muted">Риск и плечо перенесутся на /live. Бумажный вход — переключи «Режим» в шапке на «Бумага».</span>
       ) : (
-        blockReason && <span className="muted">{blockReason}</span>
+        <>
+          {blockReason && <span className="muted">{blockReason}</span>}
+          {!blockReason && marketPrice > 0 && (
+            <span className="muted">
+              По рынку: цена {fmt(marketPrice, decimals)} · маржа {fmt(marketMargin)} $
+              {marketBlockReason && ` · ${marketBlockReason}`}
+            </span>
+          )}
+        </>
       )}
     </div>
   );

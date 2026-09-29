@@ -17,6 +17,11 @@
 //   bun scripts/backtest.mjs --no-funding --slippage-bps 2
 //   bun scripts/backtest.mjs --conf 0               # без порога уверенности
 //
+// Исследовательские флаги (выключены по умолчанию — baseline не меняют):
+//   bun scripts/backtest.mjs --no-shorts            # только лонги (шорты статистически слабее)
+//   bun scripts/backtest.mjs --atr-max 2.5          # из выборки убрать сетапы с ATR% выше порога
+//   bun scripts/backtest.mjs --tp1-full             # выход: закрыть весь объём по TP1 вместо лесенки
+//
 // Отчёт: консоль + scripts/backtest-report.json (механический diff между прогонами).
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -46,6 +51,11 @@ const USE_FUNDING = !flag('no-funding');
 const WINDOW = 200;
 const STEP = 5;
 const ENTRY_TOUCH_BARS = 3; // в течение скольких баров зона должна быть задета, чтобы вход был
+
+// Исследовательские флаги (все off по умолчанию — дефолтный прогон не меняют):
+const NO_SHORTS = flag('no-shorts');        // только лонги
+const ATR_MAX = arg('atr-max') == null ? null : Number(arg('atr-max')); // верхний порог ATR% сетапа
+const TP1_FULL = flag('tp1-full');          // закрыть весь объём по TP1 вместо лесенки 70/20/10
 
 let symbolsCli = arg('symbols');
 if (symbolsCli) symbolsCli = symbolsCli.split(',').map((s) => s.trim()).filter(Boolean);
@@ -172,8 +182,8 @@ function feeFor(notional) {
 
 /**
  * Проигрывание сделки по правилам бумажного движка (evaluatePosition), но с
- * настоящими ценами исполнения: лимитный вход в зону (только если зона задета),
- * стоп/тейки со слипом, фандинг за время удержания.
+ * настоящими ценами исполнения: лимитный вход по середине зоны (только если цена
+ * дошла до лимита), стоп/тейки со слипом, фандинг за время удержания.
  */
 function runTrade(plan, candles, idx, funding) {
   const side = plan.direction === 'long' ? 1 : -1;
@@ -181,11 +191,13 @@ function runTrade(plan, candles, idx, funding) {
   const riskDist = plan.riskDist || 1e-9;
   const qty = RISK_USD / riskDist;
 
-  // 1) Вход: ждём касания зоны в течение ENTRY_TOUCH_BARS баров.
+  // 1) Вход: ждём касания ЛИМИТА (entryMid) в течение ENTRY_TOUCH_BARS баров.
+  // Касания верхней/нижней границы зоны недостаточно: заявка стоит по середине,
+  // и до неё цена может не дойти — тогда сделки нет вовсе.
   let entryIdx = -1;
   for (let k = idx; k < Math.min(idx + ENTRY_TOUCH_BARS, candles.length); k++) {
     const c = candles[k];
-    const touched = side === 1 ? c.low <= plan.entryHigh : c.high >= plan.entryLow;
+    const touched = side === 1 ? c.low <= entryMid : c.high >= entryMid;
     if (touched) { entryIdx = k; break; }
   }
   if (entryIdx < 0) return null; // лимит не набрался — сделки нет
@@ -199,7 +211,7 @@ function runTrade(plan, candles, idx, funding) {
     direction: plan.direction,
     entryPrice: entryFill, entryLow: plan.entryLow, entryHigh: plan.entryHigh,
     stop: plan.stop, tp1: plan.tp1, tp2: plan.tp2, tp3: plan.tp3,
-    leverage: 3, qty, openedAt: entryTime, status: 'open',
+    leverage: 3, qty, openedAt: entryTime, filledAt: entryTime, status: 'open',
     legs: [],
   };
   const ev = evaluatePosition(draft, candles.slice(entryIdx));
@@ -218,11 +230,14 @@ function runTrade(plan, candles, idx, funding) {
   }
 
   // 4) Денежный P&L по ногам./остатку, с комиссией на каждое исполнение.
-  const legs = ev.events.filter((e) => e.type === 'tp1' || e.type === 'tp2');
+  // При --tp1-full: весь объём закрывается по TP1 (если он достигнут), tp2/tp3 игнорируются.
+  const legs = TP1_FULL
+    ? ev.events.filter((e) => e.type === 'tp1')
+    : ev.events.filter((e) => e.type === 'tp1' || e.type === 'tp2');
   let pnl = 0;
   let remaining = 1;
   for (const leg of legs) {
-    const frac = leg.type === 'tp1' ? TP_FRACS.tp1 : TP_FRACS.tp2;
+    const frac = TP1_FULL ? 1 : (leg.type === 'tp1' ? TP_FRACS.tp1 : TP_FRACS.tp2);
     const px = slip(-side, leg.price);
     const notional = qty * frac * px;
     pnl += side * (px - entryFill) * qty * frac - feeFor(notional);
@@ -245,9 +260,12 @@ function runTrade(plan, candles, idx, funding) {
     return { censored: true, how: 'open-flat', r: 0, mfe: ev.mfeR, mae: ev.maeR };
   }
   pnl -= fundingCost;
+  // При --tp1-full честный исход — 'tp1' (весь объём), если TP1 достигнут;
+  // иначе стоп/ликвидация как обычно.
+  const how = TP1_FULL && legs.length > 0 ? 'tp1' : (ev.events.at(-1)?.type ?? 'flat');
   return {
     censored: false,
-    how: ev.events.at(-1)?.type ?? 'flat',
+    how,
     r: pnl / RISK_USD,
     mfe: ev.mfeR,
     mae: ev.maeR,
@@ -291,9 +309,11 @@ for (const s of universe) {
     if (!m) continue;
     const plan = buildTradePlan(win, m, 'linear', null, INTERVAL);
     if (!plan || plan.direction === 'wait') { agg.wait += 1; continue; }
+    if (NO_SHORTS && plan.direction === 'short') continue;             // эксперимент: только лонги
     if (MIN_CONF > 0 && plan.confidence < MIN_CONF) continue;             // паритет: порог уверенности
     const atrPct = m.atrPct;
     if (atrPct < SUSPICIOUS.minAtrPct) continue;                           // паритет: вялый ход
+    if (ATR_MAX != null && atrPct > ATR_MAX) continue;                     // эксперимент: ужесточить ATR%
     agg.signals += 1; sig += 1;
     const res = runTrade(plan, rows, i, funding);
     if (!res) continue; // лимит не набрался
@@ -333,7 +353,7 @@ show(agg.byMfe, 'касание 1R за жизнь сделки');
 // ---- Отчёт в JSON для диффа между прогонами -----------------------------------
 const report = {
   savedAt: Date.now(),
-  config: { interval: INTERVAL, minConf: MIN_CONF, slippageBps: SLIPPAGE_BPS, riskUsd: RISK_USD, funding: USE_FUNDING, universeSize: universe.length },
+  config: { interval: INTERVAL, minConf: MIN_CONF, slippageBps: SLIPPAGE_BPS, riskUsd: RISK_USD, funding: USE_FUNDING, universeSize: universe.length, noShorts: NO_SHORTS, atrMax: ATR_MAX, tp1Full: TP1_FULL },
   totals: { signals: agg.signals, filled: agg.filled, censored: agg.censored, n: agg.n, avgR: agg.rSum / Math.max(1, agg.n) },
   byDir: agg.byDir, byConf: agg.byConf, byAtr: agg.byAtr, byQ: agg.byQ, byMfe: agg.byMfe,
 };

@@ -18,3 +18,14 @@ export function PlusIcon() {
     </svg>
   );
 }
+
+/** Значок «установить приложение»: стрелка вниз на подставку. */
+export function InstallIcon() {
+  return (
+    <svg className="icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="12" y1="3" x2="12" y2="15" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="4" y1="20" x2="20" y2="20" />
+    </svg>
+  );
+}

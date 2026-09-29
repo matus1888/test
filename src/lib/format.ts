@@ -11,6 +11,12 @@ export const fmtPct = (v: number | null | undefined, digits = 2): string => {
   return `${sign}${v.toFixed(digits)}%`;
 };
 
+/** Процент без знака — когда направление уже сказано словами («выше/ниже»). */
+export const fmtPctAbs = (v: number | null | undefined, digits = 2): string => {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '—';
+  return `${Math.abs(v).toFixed(digits)}%`;
+};
+
 export const fmtCompact = (v: number | null | undefined): string => {
   if (v === null || v === undefined || !Number.isFinite(v)) return '—';
   return Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 2 }).format(v);

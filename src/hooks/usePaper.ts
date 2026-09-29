@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { applySettle, canOpenPosition, closeAllPositions, type DraftKey, type PaperPosition, type SettleInfo } from '../lib/paper';
+import {
+  applyCancel,
+  applyFill,
+  applySettle,
+  canOpenPosition,
+  closeAllPositions,
+  type DraftKey,
+  type FillInfo,
+  type PaperPosition,
+  type SettleInfo,
+} from '../lib/paper';
 
 const KEY = 'paper:positions:v1';
 // Событие для оповещения экземпляров хука в ЭТОЙ вкладке: нативный `storage`-event
@@ -84,6 +94,27 @@ export function usePaperPositions() {
     return true;
   }, [update]);
 
+  /**
+   * Материализация исполнения лимитов: заявка в рынке → позиция в рынке.
+   * Пишет только при реальном переходе статуса (applyFill возвращает тот же массив).
+   */
+  const fill = useCallback(
+    (list: { id: string; info: FillInfo }[]) => {
+      if (list.length === 0) return;
+      update((prev) => applyFill(prev, list));
+    },
+    [update],
+  );
+
+  /** Снять заявки, которые не исполнились. */
+  const cancelPending = useCallback(
+    (list: { id: string; reason: 'manual' | 'stale' }[]) => {
+      if (list.length === 0) return;
+      update((prev) => applyCancel(prev, list));
+    },
+    [update],
+  );
+
   const closeManual = useCallback(
     (id: string, price: number, time: number) =>
       update((prev) =>
@@ -117,5 +148,5 @@ export function usePaperPositions() {
     [update],
   );
 
-  return { positions, add, closeManual, closeAll, settle, remove };
+  return { positions, add, fill, cancelPending, closeManual, closeAll, settle, remove };
 }

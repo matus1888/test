@@ -1,25 +1,38 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyCancel,
+  applyFill,
   applySettle,
   bookedPnl,
   canOpenPosition,
   closeAllPositions,
   closeLabel,
   entryBlockReason,
+  entryPriceFor,
   evaluatePosition,
   eventLabel,
   feeOf,
+  fillTimeOf,
+  fillsFor,
+  filledAtOf,
   fmtDuration,
   fmtTime,
+  isFilled,
   legsOf,
+  limitGap,
   liquidationPrice,
+  limitReached,
   liqToStopRatio,
   makePaperPosition,
   maxSafeLeverage,
-  pnlOf,
+  pendingMargin,
   positionMetrics,
+  riskDistFor,
+  pnlOf,
   remainingFrac,
   settleOpen,
+  staleLimits,
+  totalEngagedMargin,
   totalPnlOf,
   TP_FRACS,
   uid,
@@ -645,14 +658,87 @@ describe('entryBlockReason / makePaperPosition (быстрый вход из т�
   const draft = { symbol: 'AAAUSDT', category: 'linear' as const, interval: '5' as const, direction: 'long' as const };
   const opts = { deposit: 1000, riskPct: 1, stake: 250, leverage: 3 };
 
-  it('makePaperPosition: размер из риска (riskMoney/riskDist), поля из плана', () => {
+  it('makePaperPosition: размер из риска (riskMoney/riskDist), поля из плана, статус — заявка', () => {
     const p = makePaperPosition('AAAUSDT', 'linear', '5', plan(), opts);
     expect(p.qty).toBeCloseTo(10 / 9, 8);
     expect(p.entryPrice).toBe(100);
     expect(p.riskMoney).toBe(10);
     expect(p.stop).toBe(91);
     expect(p.direction).toBe('long');
+    // Позиции ещё нет: выставлен лимит, ждём касания цены.
+    expect(p.status).toBe('pending');
+    expect(p.filledAt).toBeUndefined();
+  });
+
+  it('makePaperPosition по рынку: цена = текущая котировка, позиция открыта сразу', () => {
+    // Цена выше середины зоны (лонг ждал отката) — вход по рынку исполняется тут же.
+    const p = makePaperPosition('AAAUSDT', 'linear', '5', plan({ price: 103 }), opts, { kind: 'market', price: 103 });
+    expect(p.entryPrice).toBe(103);
+    expect(p.entryKind).toBe('market');
     expect(p.status).toBe('open');
+    expect(p.filledAt).toBe(p.openedAt);
+    expect(filledAtOf(p)).toBe(p.openedAt);
+    // Размер — от фактической дистанции до стопа (|103−91| = 12, а не плановые 9):
+    // риск в $ тот же, но количество меньше.
+    expect(p.qty).toBeCloseTo(10 / 12, 8);
+    expect(Math.abs(p.entryPrice - p.stop) * p.qty).toBeCloseTo(10, 8);
+    // Плата за вход без отката: дистанция до стопа шире, поэтому при том же риске
+    // количество меньше и маржа ниже — но и до TP1 дальше, то есть RR хуже.
+    const limitPos = makePaperPosition('AAAUSDT', 'linear', '5', plan({ price: 103 }), opts);
+    expect(positionMetrics(p).margin).toBeLessThan(positionMetrics(limitPos).margin);
+    // ...но до TP1 в R получается хуже: риск до стопа вырос, а цель та же
+    const rrTp1 = (x: PaperPosition) => Math.abs(x.tp1 - x.entryPrice) / Math.abs(x.entryPrice - x.stop);
+    expect(rrTp1(limitPos)).toBeCloseTo(10 / 9, 8);
+    expect(rrTp1(p)).toBeCloseTo(7 / 12, 8);
+    expect(rrTp1(p)).toBeLessThan(rrTp1(limitPos));
+    // Плановая дистанция риска из плана при этом не изменилась — риск в $ один и тот же.
+    expect(plan({ price: 103 }).riskDist).toBe(9);
+  });
+
+  it('entryPriceFor / riskDistFor: рынок — котировка, лимит — середина зоны', () => {
+    expect(entryPriceFor('limit', plan(), 103)).toBe(100);
+    expect(entryPriceFor('market', plan(), 103)).toBe(103);
+    // без котировки рыночный вход невозможен — падаем обратно на лимит
+    expect(entryPriceFor('market', plan(), null)).toBe(100);
+    expect(entryPriceFor('market', plan(), 0)).toBe(100);
+    expect(riskDistFor(103, plan())).toBe(12);
+    expect(riskDistFor(100, plan())).toBe(9);
+    expect(riskDistFor(93, plan())).toBe(2);
+  });
+
+  it('entryBlockReason по рынку: те же ворота, плюс требование котировки', () => {
+    expect(entryBlockReason([], draft, plan(), opts, { kind: 'market', price: 103 })).toBeNull();
+    // без цены вход по рынку невозможен
+    expect(entryBlockReason([], draft, plan(), opts, { kind: 'market' })).toMatch(/текущей цены/i);
+    expect(entryBlockReason([], draft, plan(), opts, { kind: 'market', price: 0 })).toMatch(/текущей цены/i);
+    // дубль блокирует и рыночный вход
+    expect(entryBlockReason([pos({ symbol: 'AAAUSDT' })], draft, plan(), opts, { kind: 'market', price: 103 })).toMatch(/дубль/i);
+    // риск/ликвидация/маржа считаются от фактической цены входа: чем ближе вход к стопу,
+    // тем крупнее позиция под тот же риск и тем больше маржа.
+    const tightStake = { ...opts, stake: 40 };
+    expect(entryBlockReason([], draft, plan(), tightStake)).toBeNull();          // маржа 37 $ — помещается
+    expect(entryBlockReason([], draft, plan(), { ...opts, stake: 20 })).toMatch(/маржи/i);
+    // цена упала к стопу (95 против стопа 91): та же ставка уже не помещается
+    expect(
+      entryBlockReason([], draft, plan({ price: 95 }), tightStake, { kind: 'market', price: 95 }),
+    ).toMatch(/маржи/i);
+  });
+
+  it('рыночный вход: лесенка и стоп работают как у лимитного, бар входа — только по вредной стороне', () => {
+    const p = makePaperPosition('AAAUSDT', 'linear', '5', plan({ price: 103 }), opts, { kind: 'market', price: 103 });
+    // Вход по рынку происходит «сейчас»: свечи раньше filledAt движка не касаются,
+    // а бар самого входа оценивается только по вредной стороне (его максимум был до входа).
+    const bar = { high: 112, low: 100 };
+    expect(evaluatePosition(p, [candle(0, 103, { ...bar, time: 1_000_000 })]).events).toEqual([]);
+    const filled = { ...p, openedAt: 1_000, filledAt: 1_000 };
+    // бар самого входа: максимум мог быть ДО входа, поэтому TP1 здесь не засчитывается
+    expect(evaluatePosition(filled, [candle(0, 103, { ...bar, time: 1_000 })]).events).toEqual([]);
+    const ev = evaluatePosition(filled, [
+      candle(0, 103, { ...bar, time: 1_000 }),
+      candle(1, 109, { ...bar, time: 2_000 }),
+    ]);
+    expect(ev.events.map((e) => e.type)).toContain('tp1');
+    expect(ev.maxTp).toBe(1);
   });
 
   it('entryBlockReason: разрешён → null', () => {
@@ -678,6 +764,20 @@ describe('entryBlockReason / makePaperPosition (быстрый вход из т�
 
   it('entryBlockReason: дубль блокирует', () => {
     expect(entryBlockReason([pos({ symbol: 'AAAUSDT' })], draft, plan(), opts)).toMatch(/дубль/i);
+  });
+
+  it('entryBlockReason: висящая заявка в рынке — тоже дубль', () => {
+    const pending = pos({ symbol: 'AAAUSDT', status: 'pending' });
+    expect(entryBlockReason([pending], draft, plan(), opts)).toMatch(/дубль/i);
+    // отменённая заявка дублем не считается
+    const cancelled = pos({ symbol: 'AAAUSDT', status: 'cancelled' });
+    expect(entryBlockReason([cancelled], draft, plan(), opts)).toBeNull();
+  });
+
+  it('портфельный лимит не считает неисполненные заявки', () => {
+    const pending = Array.from({ length: 5 }, (_, i) => pos({ id: `p${i}`, symbol: `P${i}USDT`, status: 'pending' }));
+    const fiveHundred = { deposit: 500, riskPct: 1, stake: 1000, leverage: 3 };
+    expect(entryBlockReason(pending, draft, plan(), fiveHundred)).toBeNull();
   });
 
   it('портфельный лимит: суммарная маржа открытых ≤ депозита', () => {
@@ -706,5 +806,186 @@ describe('closeAllPositions', () => {
     expect(closeAllPositions([], () => 1)).toEqual([]);
     const onlyClosed = p({ id: 'c', symbol: 'CUSDT', status: 'closed' as const });
     expect(closeAllPositions([onlyClosed], () => 1)).toEqual([onlyClosed]);
+  });
+
+  it('неисполненные заявки снимаются, а не «закрываются»', () => {
+    const pending = p({ id: 'z1', symbol: 'ZZZUSDT', status: 'pending' });
+    const next = closeAllPositions([pending], (x) => x.entryPrice + 10, 1);
+    expect(next[0]).toMatchObject({ status: 'cancelled', cancelReason: 'manual' });
+    expect(next[0].closePrice).toBeUndefined();
+  });
+});
+
+describe('лимитная заявка: исполнение по касанию цены', () => {
+  const limit = (over: Partial<PaperPosition> = {}): PaperPosition =>
+    pos({ status: 'pending', entryPrice: 100, stop: 90, tp1: 110, openedAt: 0, ...over });
+
+  it('filledAtOf: pending без filledAt → ещё не исполнена; legacy-позиции исполнены в openedAt', () => {
+    expect(filledAtOf(limit())).toBeUndefined();
+    expect(filledAtOf(pos())).toBe(0);
+    expect(filledAtOf(limit({ filledAt: 7 }))).toBe(7);
+    expect(isFilled(limit())).toBe(false);
+    expect(isFilled(limit({ filledAt: 7 }))).toBe(true);
+  });
+
+  it('снятая заявка — тоже без сделок: filledAt пуст, P&L и комиссия нулевые', () => {
+    const dead = limit({ status: 'cancelled', cancelReason: 'manual', closedAt: 5 });
+    expect(filledAtOf(dead)).toBeUndefined();
+    expect(isFilled(dead)).toBe(false);
+    // цена где угодно — результат нулевой и без комиссии (на бирже заявку без исполнения не списывают)
+    for (const price of [0, 90, 130, 1000]) {
+      const r = totalPnlOf(dead, price);
+      expect(r.pnl).toBe(0);
+      expect(r.net).toBe(0);
+      expect(r.fee).toBe(0);
+      expect(r.netR).toBe(0);
+    }
+    expect(feeOf(dead)).toBe(0);
+    // и событий движка не будет: позиции не существовало
+    expect(evaluatePosition(dead, [candle(0, 130, { high: 135, low: 85 })]).events).toEqual([]);
+    expect(settleOpen(dead, [candle(0, 130, { high: 135, low: 85 })])).toBeNull();
+  });
+
+  it('limitReached: лонг исполняется на касании лимита снизу, шорт — снизу вверх', () => {
+    const l = limit();
+    expect(limitReached(l, 101)).toBe(false);
+    expect(limitReached(l, 100)).toBe(true);
+    expect(limitReached(l, 98)).toBe(true);
+    const s = limit({ direction: 'short', stop: 110, tp1: 90 });
+    expect(limitReached(s, 99)).toBe(false);
+    expect(limitReached(s, 100)).toBe(true);
+    expect(limitReached(s, 103)).toBe(true);
+    // мусор на входе не считается касанием
+    expect(limitReached(l, Number.NaN)).toBe(false);
+    expect(limitReached(l, 0)).toBe(false);
+  });
+
+  it('limitGap: сколько ещё не хватает цене до лимита (0 = лимит в рынке)', () => {
+    expect(limitGap(limit(), 100)).toBe(0);
+    expect(limitGap(limit(), 105)).toBeCloseTo(0.05, 8);
+    const s = limit({ direction: 'short', stop: 110, tp1: 90 });
+    expect(limitGap(s, 95)).toBeCloseTo(0.05, 8);
+  });
+
+  it('fillTimeOf: цена не дошла — заявка в рынке', () => {
+    const l = limit();
+    const candles = [candle(0, 104, { high: 106, low: 102 })]; // до лимита не дошли
+    expect(fillTimeOf(l, candles, 103, 10 * T)).toBeNull();
+  });
+
+  it('fillTimeOf: по живой цене — момент «сейчас»', () => {
+    expect(fillTimeOf(limit(), [], 99.5, 10 * T)).toBe(10 * T);
+  });
+
+  it('fillTimeOf: по истории свечей берётся время самой ранней (вкладка была закрыта)', () => {
+    const l = limit();
+    const candles = [candle(0, 104, { high: 105, low: 103 }), candle(1, 101, { high: 102, low: 98 })];
+    expect(fillTimeOf(l, candles, 104, 10 * T)).toBe(T);
+  });
+
+  it('fillTimeOf: свечи до постановки заявки не считаются', () => {
+    const l = limit({ openedAt: 3 * T });
+    const candles = [candle(0, 95, { high: 96, low: 94 }), candle(3, 99, { high: 100, low: 98 })];
+    // первая свеча была до заявки; вторая её задевает
+    expect(fillTimeOf(l, candles, null, 10 * T)).toBe(3 * T);
+    expect(fillTimeOf(l, [candles[0]], null, 10 * T)).toBeNull();
+  });
+
+  it('totalPnlOf по заявке строго нулевой: никакой «мгновенной прибыли»', () => {
+    const l = limit();                       // лимит 100, цена 130 — максимально «выгодный» вход
+    const r = totalPnlOf(l, 130);
+    expect(r.pnl).toBe(0);
+    expect(r.net).toBe(0);
+    expect(r.r).toBe(0);
+    expect(r.netR).toBe(0);
+    expect(r.fee).toBe(0);
+    expect(r.netMarginPct).toBe(0);
+    // но размер виден: сколько встанет в работу при исполнении
+    expect(r.notional).toBe(200);
+    expect(r.margin).toBe(100);
+  });
+
+  it('evaluatePosition по заявке: событий нет (позиции ещё нет)', () => {
+    const ev = evaluatePosition(limit(), [candle(0, 130, { high: 135, low: 85 })]);
+    expect(ev.events).toEqual([]);
+    expect(ev.maxTp).toBe(0);
+    expect(ev.mfeR).toBe(0);
+    expect(ev.stopHit).toBe(false);
+  });
+
+  it('settleOpen по заявке → null', () => {
+    expect(settleOpen(limit(), [candle(0, 130, { high: 135, low: 85 })])).toBeNull();
+  });
+
+  it('fillsFor: собирает только реально исполненные заявки', () => {
+    const a = limit({ id: 'a' });                              // лонг, цена 99 ≤ лимита 100 → исполнен
+    const b = limit({ id: 'b', direction: 'short', stop: 110, tp1: 90 }); // шорт, цена 99 < 100 → ждём роста
+    const c = limit({ id: 'c', entryPrice: 50 });                // лонг, цена 120 > 50 → ждём отката
+    const price = (p: PaperPosition) => (p.id === 'a' ? 99 : 99);
+    expect(fillsFor([a, b, c], () => [], price, 10 * T)).toEqual([
+      { id: 'a', info: { filledAt: 10 * T } },
+    ]);
+    // шорт исполняется, когда цена доходит до лимита снизу вверх
+    expect(fillsFor([b], () => [], () => 101, 10 * T)).toEqual([{ id: 'b', info: { filledAt: 10 * T } }]);
+    expect(fillsFor([pos()], () => [], () => 1, 10 * T)).toEqual([]); // уже исполненная — нечего делать
+  });
+
+  it('staleLimits: неисполненная заявка протухает по TTL', () => {
+    const day = 24 * 3600 * 1000;
+    const fresh = limit({ openedAt: day });        // висит меньше суток
+    const old = limit({ id: 'old', openedAt: 0 }); // висит двое суток
+    expect(staleLimits([fresh], day + 1000)).toEqual([]);
+    expect(staleLimits([old], day * 2)).toEqual([{ id: 'old', reason: 'stale' }]);
+    expect(staleLimits([pos({ openedAt: 0 })], day * 2)).toEqual([]); // исполненные не трогаем
+  });
+
+  it('applyFill: pending → open с отметкой исполнения, без изменений — тот же массив', () => {
+    const l = [limit()];
+    const next = applyFill(l, [{ id: 'p1', info: { filledAt: T } }]);
+    expect(next[0].status).toBe('open');
+    expect(next[0].filledAt).toBe(T);
+    const prev = [pos()];
+    expect(applyFill(prev, [])).toBe(prev);
+    expect(applyFill(prev, [{ id: 'p1', info: { filledAt: T } }])).toBe(prev);
+  });
+
+  it('applyCancel: заявка снимается с причиной и временем, исполненные не трогаем', () => {
+    const next = applyCancel([limit()], [{ id: 'p1', reason: 'stale' }], 9);
+    expect(next[0]).toMatchObject({ status: 'cancelled', cancelReason: 'stale', closedAt: 9 });
+    const prev = [pos()];
+    expect(applyCancel(prev, [{ id: 'p1', reason: 'manual' }])).toBe(prev);
+  });
+
+  it('pendingMargin: заявки не входят в занятый капитал, но видны отдельно', () => {
+    const list = [limit({ id: 'a' }), limit({ id: 'b' }), pos({ id: 'c' })];
+    expect(totalEngagedMargin(list)).toBe(100);   // только исполненная
+    expect(pendingMargin(list)).toBe(200);        // две заявки по 100 маржи
+  });
+
+  it('бар исполнения: стоп засчитывается, тейк — нет (движение внутри бара неизвестно)', () => {
+    // исполнение найдено по самой свече: её максимум мог быть ДО входа
+    const filled = pos({ filledAt: 0 });
+    const ev = evaluatePosition(filled, [
+      candle(0, 104, { high: 115, low: 98 }), // TP1=110 задет, но до исполнения мог быть
+      candle(1, 112, { high: 113, low: 108 }), // TP1 уже засчитывается
+    ]);
+    expect(ev.events.map((e) => e.type)).toEqual(['tp1']);
+    expect(ev.events[0].time).toBe(T);
+    // MFE считается по бару после исполнения (113−100)/10 = 1.3R, максимум бара
+    // исполнения (115) в MFE не попадает — иначе это был бы ход ДО входа.
+    expect(ev.mfeR).toBeCloseTo(1.3, 8);
+  });
+
+  it('бар исполнения: стоп внутри него честно закрывает позицию', () => {
+    const filled = pos({ filledAt: 0 });
+    const ev = evaluatePosition(filled, [candle(0, 100, { high: 102, low: 85 })]);
+    expect(ev.stopHit).toBe(true);
+    expect(ev.events.map((e) => e.type)).toEqual(['stop']);
+  });
+
+  it('без filledAt (legacy/запись до появления лимитов) бар исполнения не выделяется', () => {
+    const ev = evaluatePosition(pos(), [candle(0, 112, { high: 113, low: 108 })]);
+    expect(ev.maxTp).toBe(1);
+    expect(ev.mfeR).toBeCloseTo(1.3, 8);
   });
 });
