@@ -9,6 +9,7 @@
 
 import type { Category } from '../api/bybit';
 import type { ApiExecution } from '../api/privateApi';
+import { nowBybitMs } from './clock';
 
 /** Причина филла (вход или вид закрытия). */
 export type RealExitKind =
@@ -34,7 +35,22 @@ export interface RealTrade {
   execId: string;
 }
 
-const KEY = 'real:history:v1';
+/**
+ * Настоящая сделка или нет. `/v5/execution/list` (и WS-топик `execution`) рядом с
+ * торговыми филлами отдают служебные строки: `execType: "Funding"` — начисление
+ * фандинга (orderType UNKNOWN, без orderLinkId). Это не покупка и не продажа,
+ * а денежный поток; если принять его за сделку, номинал входа/выхода удваивается
+ * и P&L по циклу становится фантомным (проверено на живом счёте 30.09.2026:
+ * −91 $ вместо +1.8 $ по ENA и +586 $ по шорту XAU → «P&L сегодня +363 $»).
+ */
+export function isTradeExecution(e: { execType?: string }): boolean {
+  const t = (e.execType ?? '').toLowerCase();
+  return t === '' || t === 'trade';
+}
+
+// v2: в v1 попадали строки фандинга (execType Funding) — цифры P&L были фантомными.
+// Хранилище переехало на новый ключ, история пересобирается из биржи заново.
+const KEY = 'real:history:v2';
 const CHANGED_EVENT = 'real:history:changed';
 
 /** Распознать тип филла по orderLinkId и типу ордера. */
@@ -109,9 +125,11 @@ export function mergeExecutions(current: RealTrade[], incoming: ApiExecution[], 
   const byId = new Map(current.map((t) => [t.execId, t]));
   for (const e of incoming) {
     if (!e.execId || byId.has(e.execId)) continue;
+    // Фандинг и прочие служебные строки сделками не являются.
+    if (!isTradeExecution(e)) continue;
     const t = executionToTrade(e);
     if (!t.symbol || !(t.qty > 0) || !(t.price > 0)) continue;
-    byId.set(t.execId, t);
+    byId.set(e.execId, t);
   }
   return [...byId.values()].sort((a, b) => b.execTime - a.execTime).slice(0, limit);
 }
@@ -208,15 +226,19 @@ export function realHistorySummary(list: RealTrade[]) {
   };
 }
 
-/** Начало «сегодня» по локальному времени (мс). */
-export function startOfToday(now = Date.now()): number {
+/**
+ * Начало «сегодня» (мс). Часы по умолчанию — выровненные по бирже: моменты
+ * исполнений приходят с биржи, поэтому со сбитыми часами телефона «сегодня»
+ * могло бы не совпасть с реальными сутками сделки.
+ */
+export function startOfToday(now = nowBybitMs()): number {
   const d = new Date(now);
   d.setHours(0, 0, 0, 0);
   return d.getTime();
 }
 
 /** P&L циклов, закрытых сегодня (последний филл цикла — сегодня), за вычетом комиссий. */
-export function todayRealPnl(list: RealTrade[], now = Date.now()): number {
+export function todayRealPnl(list: RealTrade[], now = nowBybitMs()): number {
   const start = startOfToday(now);
   return bySymbolHistory(list)
     .filter((s) => s.lastTime >= start && s.lastTime <= now)

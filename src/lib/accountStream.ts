@@ -2,6 +2,7 @@
 // со снимком REST. Чистые функции: их можно тестировать без сокета и без ключей.
 
 import type { ActiveOrder, ApiPosition, WalletBalance } from '../api/privateApi';
+import { isTradeExecution } from './realHistory';
 
 const num = (v: unknown): number => {
   const n = Number(v);
@@ -88,12 +89,17 @@ export interface ApiFill {
   isMaker: boolean;
 }
 
+/**
+ * Кадр `execution` → филл. Служебные строки (фандинг и прочие не-Trade) отбрасываются:
+ * в WS они приходят тем же топиком, а в истории сделок им не место.
+ */
 export function parseWsExecution(data: unknown): ApiFill | null {
   if (typeof data !== 'object' || data === null) return null;
   const d = data as Record<string, unknown>;
   const execId = str(d.execId);
   const symbol = str(d.symbol);
   if (!execId || !symbol) return null;
+  if (!isTradeExecution({ execType: str(d.execType) })) return null;
   return {
     execId,
     orderId: str(d.orderId),

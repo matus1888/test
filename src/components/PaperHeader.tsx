@@ -63,7 +63,9 @@ export default function PaperHeader() {
   return (
     <div className="topbar">
       <Link to="/" className="brand">Скринер Bybit</Link>
-      <div className="topbar-right">
+      {/* Навигация — своя группа и на десктопе, и на телефоне: в общем потоке с чипом
+          портфеля шесть ссылок не переносились и растягивали шапку за пределы экрана. */}
+      <div className="nav-row">
         <Link to="/paper" className="api-link" title="Бумажный портфель: виртуальные сделки, P&L и разбор позиций">Бумага</Link>
         <Link to="/live" className="api-link" title="Реальная торговля Bybit: план → ордер, позиции, активные ордера">Реально</Link>
         <Link to="/api" className="api-link" title="Подключение API Bybit: ключ, баланс и позиции">API</Link>
@@ -75,6 +77,8 @@ export default function PaperHeader() {
           onClick={() => window.dispatchEvent(new Event('open-walkthrough'))}
         >?</button>
         <InstallButton />
+      </div>
+      <div className="topbar-right">
         <TradeModeSwitch />
         {shown === 'real' ? (
           live ? (

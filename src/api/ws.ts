@@ -6,7 +6,7 @@
 // событиями. Отдельный модуль без React, чтобы его можно было тестировать с заглушкой сокета.
 
 import type { Category } from './bybit';
-import { hmacHex, type ApiCredentials } from './privateApi';
+import { hmacHex, nowBybitSafeMs, syncClock, type ApiCredentials } from './privateApi';
 
 /** Минимальный интерфейс сокета: в тестах подставляется заглушка. */
 export interface WsSocket {
@@ -78,7 +78,11 @@ export function privateWsUrl(testnet: boolean): string {
 
 /** Подпись для приватного WS: HMAC(secret, `GET/realtime{expires}`), expires = +10 с. */
 export async function buildWsAuth(cred: ApiCredentials): Promise<WsAuth> {
-  const expires = Date.now() + 10_000;
+  // expires — тоже метка времени: на телефоне со сбитыми часами биржа отклонит
+  // рукопожатие. Выравниваемся о время биржи (кэш на 30 мин, здесь почти бесплатно)
+  // и берём метку с запасом на сетевой лаг: просрочить подпись страшнее, чем недобрать.
+  await syncClock(cred.testnet);
+  const expires = nowBybitSafeMs() + 10_000;
   const signature = await hmacHex(cred.secret, `GET/realtime${expires}`);
   return { key: cred.key, expires, signature };
 }

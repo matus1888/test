@@ -1,6 +1,8 @@
 // Bybit V5 public market API. Docs: https://bybit-exchange.github.io/docs/v5/market/tickers
 // Без ключа. Прямой base + fallback на Vite proxy (/bybit) при CORS-ошибке.
 
+import { harvestServerTime } from '../lib/clock';
+
 export type Category = 'spot' | 'linear' | 'inverse' | 'option';
 export const CATEGORIES: Category[] = ['linear', 'spot', 'inverse', 'option'];
 
@@ -90,6 +92,8 @@ interface BybitResp<T> {
   retCode: number;
   retMsg: string;
   result: T;
+  /** Время биржи в ответе, мс строкой. Источник часов, когда `/v5/public/time` закрыт. */
+  time?: string;
 }
 
 async function getJSON<T>(path: string): Promise<T> {
@@ -99,6 +103,7 @@ async function getJSON<T>(path: string): Promise<T> {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = (await r.json()) as BybitResp<T>;
     if (j.retCode !== 0) throw new Error(j.retMsg || `retCode ${j.retCode}`);
+    harvestServerTime(j.time);
     return j.result;
   } catch (e) {
     // Прокси-фолбек существует только в dev (vite server.proxy). В проде его нет —
@@ -108,6 +113,7 @@ async function getJSON<T>(path: string): Promise<T> {
     if (!r.ok) throw new Error(`HTTP ${r.status} (proxy)`);
     const j = (await r.json()) as BybitResp<T>;
     if (j.retCode !== 0) throw new Error(j.retMsg || `retCode ${j.retCode}`);
+    harvestServerTime(j.time);
     return j.result;
   }
 }

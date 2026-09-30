@@ -397,8 +397,8 @@ const doOpen = async () => {
               </div>
             )}
             <div className="table-wrap">
-              <table>
-              <thead><tr><th>Символ</th><th>uP&L</th><th><Term t="margin" label="Маржа" /></th><th><Term t="risk" label="Риск" /></th><th></th></tr></thead>
+              <table className="pin-right pin-right--narrow">
+              <thead><tr><th>Символ</th><th>uP&L</th><th><Term t="margin" label="Маржа" /></th><th><Term t="risk" label="Риск" /></th><th className="act"></th></tr></thead>
               <tbody>
                 {positions.map((p) => {
                   const dir: 'long' | 'short' = p.side === 'Buy' ? 'long' : 'short';
@@ -417,7 +417,7 @@ const doOpen = async () => {
                         {riskUsd == null ? '—' : `${fmt(riskUsd)} $`}
                         <br /><span className="muted">LIQ {p.liqPrice == null ? '—' : fmt(p.liqPrice, p.liqPrice < 1 ? 5 : 4)}</span>
                       </td>
-                      <td>
+                      <td className="act">
                         <div className="controls">
                           {p.symbol === sym && plan && plan.direction === dir && (
                             <button className="btn btn-sm" disabled={busy || !canTrade} onClick={() => void doPlaceLadder(p.symbol, dir, p.size)}>Выставить TP</button>
@@ -442,8 +442,8 @@ const doOpen = async () => {
         {ordersQ.isError && <p className="state err">Не удалось загрузить ордера: {String(ordersQ.error)}</p>}
         {orders.length === 0 ? <p className="state">Нет активных ордеров.</p> : (
           <div className="table-wrap">
-            <table>
-              <thead><tr><th>Символ</th><th>Сторона</th><th>Тип</th><th>Qty</th><th>Цена</th><th>Статус</th><th></th></tr></thead>
+            <table className="pin-right pin-right--narrow">
+              <thead><tr><th>Символ</th><th>Сторона</th><th>Тип</th><th>Qty</th><th>Цена</th><th>Статус</th><th className="act"></th></tr></thead>
               <tbody>
                 {orders.map((o) => (
                   <tr key={o.orderId}>
@@ -453,7 +453,7 @@ const doOpen = async () => {
                     <td>{fmt(o.qty, 4)}</td>
                     <td>{fmt(o.price, o.price < 1 ? 5 : 4)}</td>
                     <td>{o.orderStatus}</td>
-                    <td><button className="btn btn-sm" onClick={() => void doCancelOrder(o.orderId, o.symbol)}>Отменить</button></td>
+                    <td className="act"><button className="btn btn-sm" onClick={() => void doCancelOrder(o.orderId, o.symbol)}>Отменить</button></td>
                   </tr>
                 ))}
               </tbody>

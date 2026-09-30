@@ -1,4 +1,5 @@
 import type { Interval } from '../api/bybit';
+import { nowBybitMs } from './clock';
 
 /**
  * Длительность свечи по таймфрейму, мс. Используется, чтобы не дёргать kline
@@ -31,8 +32,12 @@ export const candleKey = (
   interval: Interval,
 ): string => `${category}:${symbol}:${interval}`;
 
-/** Сколько миллисекунд до закрытия текущей свечи (с запасом). */
-export function msToNextCandle(interval: Interval, now = Date.now()): number {
+/**
+ * Сколько миллисекунд до закрытия текущей свечи (с запасом).
+ * `now` по умолчанию — часы, выровненные по бирже: границы свечей задаёт биржа,
+ * поэтому со сбитыми часами телефона цикл обновления уезжал бы на часы/минуты.
+ */
+export function msToNextCandle(interval: Interval, now = nowBybitMs()): number {
   const ms = INTERVAL_MS[interval];
   return ms - (now % ms) + CANDLE_MARGIN_MS;
 }

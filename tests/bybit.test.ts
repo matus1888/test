@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { bybitTradeUrl, fetchKlines, fetchTickers, isCategory, isInterval } from '../src/api/bybit';
+import { applyServerTime, clockInfo, describeClock, resetClockSync, syncClockFrom } from '../src/lib/clock';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  resetClockSync();
 });
 
 const okJson = (result: unknown) => ({ retCode: 0, retMsg: 'OK', result });
@@ -51,6 +53,70 @@ describe('fetchKlines', () => {
     expect(urls[0]).toContain('limit=10');
     await fetchKlines('spot', 'ETHUSDT', 'D', 5000);
     expect(urls[1]).toContain('limit=1000');
+  });
+
+  it('timeNano читается как эпоха, а не как доли секунды', async () => {
+    // Живой ответ `/v5/market/time`: timeNano — наносекунды ЭПОХИ (19 цифр), хотя
+    // по названию и документации похоже на наносы внутри секунды. Раньше к нему
+    // прибавляли `timeSecond * 1000`, смещение часов уезжало на 1.79e12 мс вперёд
+    // (2083 год) — и ВСЕ приватные запросы падали с 10002, при этом страница /api
+    // показывала «синхронизировано, расхождения нет».
+    resetClockSync();
+    const devNow = Date.now();
+    const serverMs = devNow - 4_000; // устройство спешит на 4 с
+    // syncClockFrom читает ответ через response.text(), поэтому заглушка отдаёт text.
+    mockFetch(async (url) => {
+      const u = String(url);
+      const body = u.includes('/market/time')
+        ? {
+            retCode: 0,
+            retMsg: 'OK',
+            result: {
+              timeSecond: String(Math.floor(serverMs / 1000)),
+              timeNano: `${serverMs}000000`,
+            },
+          }
+        : { retCode: 404, retMsg: 'not found' };
+      return { ok: u.includes('/market/time'), status: u.includes('/market/time') ? 200 : 404, text: async () => JSON.stringify(body) };
+    });
+    await syncClockFrom('https://api.bybit.com', true);
+    const info = clockInfo();
+    expect(info.synced).toBe(true);
+    // смещение близко к −4 с, а не к +1.79e12 мс
+    expect(info.offsetMs).toBeGreaterThan(-15_000);
+    expect(info.offsetMs).toBeLessThan(0);
+    expect(describeClock(info)).not.toContain('не при чём');
+  });
+
+  it('неправдоподобное серверное время не портит часы (формат не опознан)', async () => {
+    // Страховка на молчаливую порчу: если ответ биржи прочитан неверно (смещение в
+    // десятки лет), часы не выравниваются по нему — иначе подпись уходит в 2083 год,
+    // и приватные запросы падают с 10002 без внятного объяснения.
+    resetClockSync();
+    applyServerTime(Date.now() + 5_000, Date.now(), Date.now());
+    const good = clockInfo().offsetMs;
+    applyServerTime(Date.now() + 30 * 365 * 24 * 3600_000, Date.now(), Date.now());
+    expect(clockInfo().offsetMs).toBe(good);
+    expect(clockInfo().synced).toBe(true);
+    // смещение в десятки лет не должно и описываться как «расхождения нет»
+    expect(describeClock({ offsetMs: 30 * 365 * 24 * 3600_000, syncedAt: Date.now(), synced: true }))
+      .toContain('не при чём');
+  });
+
+  it('время биржи из поля time подхватывается в часы приложения', async () => {
+    // `/v5/public/time` бывает закрыт (404), а `time` есть в каждом публичном ответе —
+    // это запасной источник часов, без него подпись уходит с системным временем.
+    resetClockSync();
+    const bybitNow = Date.now() + 3_600_000; // устройство отстаёт на час
+    mockFetch(async () => ({
+      ok: true,
+      json: async () => ({ ...okJson({ list: [] }), time: String(bybitNow) }),
+    }));
+    await fetchKlines('linear', 'BTCUSDT', '5', 10);
+    const info = clockInfo();
+    expect(info.synced).toBe(true);
+    expect(info.offsetMs).toBeGreaterThan(3_000_000);
+    resetClockSync();
   });
 
   it('retCode != 0 → ошибка', async () => {

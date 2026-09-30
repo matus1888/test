@@ -12,6 +12,7 @@ import {
   loadCredentials,
   parseDevCredentials,
   requestPrivate,
+  RECV_WINDOW,
   saveCredentials,
   setLeverage,
 } from '../src/api/privateApi';
@@ -57,8 +58,11 @@ describe('requestPrivate', () => {
     expect(captured!.url).toBe('https://api-testnet.bybit.com/v5/order/realtime?category=linear&symbol=BTCUSDT');
     const ts = captured!.headers['X-BAPI-TIMESTAMP'];
     const query = 'category=linear&symbol=BTCUSDT';
-    const expected = createHmac('sha256', 'SECRET').update(`${ts}APIKEY00015000${query}`).digest('hex');
+    const expected = createHmac('sha256', 'SECRET').update(`${ts}APIKEY0001${RECV_WINDOW}${query}`).digest('hex');
     expect(captured!.headers['X-BAPI-SIGN']).toBe(expected);
+    // Окно приёма — 10 с, а не 5000: на мобильной сети 5 с съедала задержка (живая ошибка 10002).
+    expect(captured!.headers['X-BAPI-RECV-WINDOW']).toBe(String(RECV_WINDOW));
+    expect(Number(RECV_WINDOW)).toBeGreaterThanOrEqual(10_000);
   });
 
   it('POST: подпись включает JSON-тело, заголовки для приватного запроса', async () => {
@@ -71,7 +75,7 @@ describe('requestPrivate', () => {
     await requestPrivate('POST', '/v5/order/create', body, { key: 'K', secret: 'S', testnet: false });
     const ts = captured!.headers['X-BAPI-TIMESTAMP'];
     expect(captured!.headers['Content-Type']).toBe('application/json');
-    const expected = createHmac('sha256', 'S').update(`${ts}K5000${captured!.body}`).digest('hex');
+    const expected = createHmac('sha256', 'S').update(`${ts}K${RECV_WINDOW}${captured!.body}`).digest('hex');
     expect(captured!.headers['X-BAPI-SIGN']).toBe(expected);
   });
 
@@ -85,9 +89,18 @@ describe('requestPrivate', () => {
     await expect(requestPrivate('GET', '/v5/x', {}, { key: 'K', secret: 'S', testnet: false })).rejects.toThrow(/HTTP 502/);
   });
 
-  it('10002 — подсказка про ключ/время', async () => {
+  it('10002 — подсказка про время устройства (ключ тут ни при чём)', async () => {
+    // 10002 = «timestamp outside of receive timestamp range»: клиент выравнивает часы
+    // о время биржи и повторяет запрос, поэтому текст ошибки должен называть время.
     mockFetch({ retCode: 10002, retMsg: 'invalid request', result: {} });
-    await expect(requestPrivate('GET', '/v5/x', {}, { key: 'K', secret: 'S', testnet: false })).rejects.toThrow(/ключ/);
+    await expect(requestPrivate('GET', '/v5/x', {}, { key: 'K', secret: 'S', testnet: false }))
+      .rejects.toThrow(/время устройства/);
+  });
+
+  it('10004 — подсказка про ключ/секрет', async () => {
+    mockFetch({ retCode: 10004, retMsg: 'sign error', result: {} });
+    await expect(requestPrivate('GET', '/v5/x', {}, { key: 'K', secret: 'S', testnet: false }))
+      .rejects.toThrow(/ключ или секрет/);
   });
 });
 

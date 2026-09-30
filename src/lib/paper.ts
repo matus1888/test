@@ -1,5 +1,6 @@
 import type { Candle, Category, Interval } from '../api/bybit';
 import type { TradePlan } from './tradePlan';
+import { nowBybitMs } from './clock';
 
 export type PaperDirection = 'long' | 'short';
 export type CloseReason = 'stop' | 'breakeven' | 'tp1' | 'tp2' | 'tp3' | 'manual' | 'liq';
@@ -146,7 +147,7 @@ export function fillTimeOf(
   live: number | null,
   now?: number,
 ): number | null {
-  const at = now ?? Date.now();
+  const at = now ?? nowBybitMs();
   let byCandle: number | null = null;
   for (const c of candles ?? []) {
     if (c.time < pos.openedAt) continue;
@@ -163,7 +164,7 @@ export function fillTimeOf(
 
 /** Заявки, которые ещё можно отменить: висят дольше TTL. */
 export function isStaleLimit(pos: PaperPosition, ttlMs: number, now?: number): boolean {
-  return pos.status === 'pending' && (now ?? Date.now()) - pos.openedAt > ttlMs;
+  return pos.status === 'pending' && (now ?? nowBybitMs()) - pos.openedAt > ttlMs;
 }
 
 /**
@@ -185,7 +186,7 @@ export function fillsFor(
   priceOf: (p: PaperPosition) => number | null,
   now?: number,
 ): { id: string; info: FillInfo }[] {
-  const at = now ?? Date.now();
+  const at = now ?? nowBybitMs();
   const out: { id: string; info: FillInfo }[] = [];
   for (const p of positions) {
     if (p.status !== 'pending') continue;
@@ -390,11 +391,11 @@ export function settleOpen(pos: PaperPosition, candles: Candle[] | undefined): S
   const legs = legsOf(ev).filter((l) => !have.has(l.reason));
   if (ev.liqHit) {
     const e = ev.events.find((x) => x.type === 'liq');
-    return { closeReason: 'liq', closePrice: e ? e.price : pos.entryPrice, closedAt: e ? e.time : Date.now(), legs };
+    return { closeReason: 'liq', closePrice: e ? e.price : pos.entryPrice, closedAt: e ? e.time : nowBybitMs(), legs };
   }
   if (ev.stopHit) {
     const e = ev.events.find((x) => x.type === 'stop');
-    return { closeReason: 'stop', closePrice: pos.stop, closedAt: e ? e.time : Date.now(), legs };
+    return { closeReason: 'stop', closePrice: pos.stop, closedAt: e ? e.time : nowBybitMs(), legs };
   }
   const be = ev.events.find((x) => x.type === 'breakeven');
   if (be) return { closeReason: 'breakeven', closePrice: pos.entryPrice, closedAt: be.time, legs };
@@ -432,7 +433,7 @@ export function applyFill(
 export function applyCancel(
   positions: PaperPosition[],
   list: { id: string; reason: 'manual' | 'stale' }[],
-  time = Date.now(),
+  time = nowBybitMs(),
 ): PaperPosition[] {
   let changed = false;
   const next = positions.map((p) => {
@@ -785,7 +786,7 @@ export function makePaperPosition(
   const kind = entry?.kind ?? 'limit';
   const entryPrice = entryPriceFor(kind, plan, entry?.price);
   const qty = riskMoney / riskDistFor(entryPrice, plan);
-  const now = Date.now();
+  const now = nowBybitMs();
   return {
     id: uid(),
     symbol,
@@ -821,7 +822,7 @@ export function makePaperPosition(
 export function canOpenPosition(
   positions: PaperPosition[],
   draft: DraftKey,
-  now = Date.now(),
+  now = nowBybitMs(),
   limits: PortfolioLimits = DEFAULT_LIMITS,
 ): string | null {
   const dup = positions.some((p) =>
@@ -857,7 +858,7 @@ export function canOpenPosition(
 export function closeAllPositions(
   positions: PaperPosition[],
   priceOf: (p: PaperPosition) => number,
-  time = Date.now(),
+  time = nowBybitMs(),
 ): PaperPosition[] {
   return positions.map((p) => {
     if (p.status === 'open') {
@@ -890,5 +891,5 @@ export function uid(): string {
   } catch {
     /* fallback ниже */
   }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${nowBybitMs().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }

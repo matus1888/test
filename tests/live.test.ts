@@ -186,7 +186,10 @@ describe('openReal', () => {
       riskMoney: 0.5, leverage: 5,
     })).rejects.toThrow(/Минимум для лесенки 70\/20\/10/);
 
-    expect(paths).toEqual(['/v5/market/instruments-info']);
+    // Кроме служебной сверки времени биржи (public/time, а если он закрыт — market/time)
+    // других запросов быть не должно: проверка размера обязана быть ДО set-leverage.
+    const isClock = (p: string) => p === '/v5/public/time' || p === '/v5/market/time';
+    expect(paths.filter((p) => !isClock(p))).toEqual(['/v5/market/instruments-info']);
   });
 
   it('placeLadder: отказ одного TP → откат снимает уже выставленные TP (cancel с symbol)', async () => {
@@ -282,8 +285,9 @@ describe('closeAllReal', () => {
       const u = new URL(String(url));
       calls.push({ path: u.pathname, body: String(init.body ?? '') });
       if (u.pathname === '/v5/order/create' && calls.filter((c) => c.path === '/v5/order/create').length === 2) {
-        // второй символ биржа отклоняет
-        return { ok: true, text: async () => JSON.stringify({ retCode: 10002, retMsg: 'Rejected', result: {} }) };
+        // Второй символ биржа отклоняет. Именно 110044, а не 10002: тот код означает
+        // рассинхрон времени устройства, и клиент сам переспрашивает биржу и повторяет.
+        return { ok: true, text: async () => JSON.stringify({ retCode: 110044, retMsg: 'Order price exceeded the allowable range', result: {} }) };
       }
       return okResult({ orderId: 'x' });
     }));

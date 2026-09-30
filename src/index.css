@@ -42,7 +42,7 @@ select, .search {
 .state.neg { color: var(--neg); }
 .state.err-note { color: #e2c08d; font-size: 12px; margin-top: 8px; }
 .api-link {
-  color: var(--muted); text-decoration: none; font-size: 13px; margin-left: auto;
+  color: var(--muted); text-decoration: none; font-size: 13px;
   border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
 }
 .api-link:hover { border-color: var(--accent); color: var(--text); }
@@ -100,9 +100,51 @@ label.check input { accent-color: var(--accent); width: 15px; height: 15px; curs
 .apiform label { flex-wrap: wrap; }
 .apiform input, .apiform select { flex: 1; min-width: 0; }
 .table-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
-table { border-collapse: collapse; width: 100%; font-size: 13px; min-width: 1100px; }
+/* Ширина таблицы по содержимому, но не меньше контейнера. Раньше стоял жёсткий
+   min-width: 1100px для всех таблиц: на телефоне любая страница с таблицей
+   (позиции, ордера, исполнения — 5–7 колонок) растягивалась до 1100px и тащила за
+   собой весь документ. Теперь «широкие» таблицы помечаются классом .wide (скринер). */
+table { border-collapse: collapse; width: 100%; font-size: 13px; min-width: 100%; }
+table.wide { min-width: 1100px; }
 th, td { padding: 8px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid #1a1e25; }
 th:first-child, td:first-child { text-align: left; }
+/* Первая колонка с парой остаётся видимой при горизонтальной прокрутке — на телефоне
+   иначе непонятно, к какой строке относится действие «Закрыть». */
+@media (max-width: 720px) {
+  .table-wrap th:first-child, .table-wrap td:first-child {
+    position: sticky; left: 0; z-index: 1; background: var(--panel);
+    box-shadow: 1px 0 0 var(--border);
+  }
+  .table-wrap tbody tr:hover td:first-child { background: #171b22; }
+  /* Правый край держим так же, как пару слева: uP&L (деньги) и действия не уезжают
+     за экран, пока пользователь прокручивает широкую таблицу к середине. Таблица
+     объявляет ширину своей колонки действий в --act-w: от неё считается смещение
+     uP&L, иначе между двумя липкими колонками появляется щель, в которую проезжает
+     прокручиваемый текст (или, наоборот, наезд одного столбца на другой).
+     Два правила, которые нельзя нарушать:
+     - колонка uP&L закрепляется только если она стоит СРАЗУ перед действиями в
+       конце таблицы. Если она в начале (как в позициях /live, где uP&L вторая), то
+       при прокрутке она заезжает под липкую пару слева и накрывает символ; там
+       uP&L и так видна без прокрутки, поэтому класс `upl` не ставится;
+     - закреплённый правый угол вместе с парой не должен съедать почти весь экран:
+       у скринера колонка действий широкая (две кнопки входа), поэтому он остаётся
+       только с липкой парой слева. */
+  .table-wrap table.pin-right { --act-w: 100px; }
+  .table-wrap table.pin-right--narrow { --act-w: 72px; }
+  .table-wrap th.upl, .table-wrap td.upl,
+  .table-wrap th.act, .table-wrap td.act {
+    position: sticky; z-index: 1; background: var(--panel);
+  }
+  .table-wrap th.act, .table-wrap td.act {
+    right: 0; width: var(--act-w); min-width: var(--act-w);
+    box-shadow: -1px 0 0 var(--border);
+  }
+  .table-wrap th.upl, .table-wrap td.upl {
+    right: var(--act-w); min-width: 96px;
+    box-shadow: 1px 0 0 var(--border);
+  }
+  .table-wrap tbody tr:hover td.upl, .table-wrap tbody tr:hover td.act { background: #171b22; }
+}
 th.sortable { cursor: pointer; color: var(--muted); user-select: none; }
 th.sortable:hover { color: #fff; }
 tbody tr { cursor: pointer; }
@@ -118,7 +160,10 @@ td.sym { font-weight: 600; }
   padding: 6px 0 8px;
   border-bottom: 1px solid var(--border);
 }
-.topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 0 0; }
+.topbar { display: flex; justify-content: flex-start; align-items: center; gap: 12px; padding: 4px 0 0; }
+/* Навигация — отдельная группа, прижатая вправо (на телефоне см. мобильный блок:
+   там она встаёт в одну прокручиваемую строку рядом с брендом). */
+.nav-row { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .topbar-right { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .brand { font-weight: 800; font-size: 15px; color: var(--text); text-decoration: none; }
 .brand:hover { color: #fff; }
@@ -207,8 +252,14 @@ td.sym { font-weight: 600; }
 .pair-link:hover .icon, .pair-link:focus-visible .icon { opacity: 1; }
 .pair-link .pair-link-note { margin-left: 4px; color: var(--muted); font-size: 12px; font-weight: 400; }
 .pair-link:hover .pair-link-note { color: #fff; }
+/* Панель быстрого входа не липкая ни на одном брейкпоинте: шапка (`position: sticky`,
+   z-index 400, высота ~83px на десктопе) перекрывает любой `top: 0` под собой, поэтому
+   липкая панель просто исчезала бы под шапкой при прокрутке страницы символа. Чтобы
+   панель не уезжала под шапку, нужно знать её высоту числом — такая «магическая» величина
+   протухает при каждой правке шапки. Панель стоит в начале страницы символа, рядом с
+   планом и кнопкой входа, поэтому просто уезжает вместе с текстом. */
 .quick-trade {
-  position: sticky; top: 0; z-index: 200;
+  position: static;
   display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
   padding: 10px 12px; font-size: 13px;
@@ -283,7 +334,10 @@ td.score { font-weight: 600; }
 .dir-wait .dir { color: var(--muted); }
 .conf { color: var(--muted); font-size: 13px; }
 .signal-summary { margin: 8px 0 4px; font-size: 15px; }
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr)); gap: 10px; }
+/* min-width: 0 у детей сетки — иначе длинный текст (например, разбор ошибки 10002)
+   распирает трек `1fr` и растягивает всю страницу по горизонтали. */
+.cards > * { min-width: 0; }
 .card { border: 1px solid var(--border); border-radius: 10px; background: var(--panel); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 .card h3 { margin: 0; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 .lvl { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
@@ -376,11 +430,20 @@ table.mini td { text-align: right; white-space: nowrap; }
   table.mini td:first-child { white-space: normal; }
 }
 
-/* ============ Мобильная вёрстка ============ */
+/* ============ Мобильная вёрстка ============
+ *
+ * Главное правило: страница никогда не прокручивается по горизонтали. Всё, что шире
+ * экрана (таблицы позиций/ордеров/исполнений), прокручивается внутри своей рамки
+ * `.table-wrap`, а первая колонка с парой закреплена слева.
+ *
+ * Второе правило — про реальный счёт: нажимаемые элементы (кнопки «Закрыть»,
+ * «Закрыть все», пункты меню, поля формы, галочки) не меньше 40px по высоте, поля
+ * ввода не меньше 44px с шрифтом 16px (иначе iOS зумит страницу при фокусе).
+ */
 @media (max-width: 960px) {
   #root { padding: 12px; }
   .topbar { flex-wrap: wrap; align-items: center; }
-  .topbar-right { justify-content: flex-start; }
+  .topbar-right { justify-content: flex-start; min-width: 0; }
   .table-wrap { -webkit-overflow-scrolling: touch; }
 }
 
@@ -391,10 +454,15 @@ table.mini td { text-align: right; white-space: nowrap; }
   .controls { gap: 8px; }
   .controls label { flex-wrap: wrap; }
   .seg { flex-wrap: wrap; }
-  .seg button, .seg a { padding: 7px 10px; }
+  .seg button, .seg a { padding: 7px 10px; min-height: 36px; }
+  /* Переключатель «Бумага ⇄ Реально» и переключатель счёта на /real — крупнее:
+     это выбор, с которого начинается работа с настоящими деньгами. */
+  .mode-seg button, .mode-seg a { min-height: 40px; }
   .search { min-width: 0; flex: 1; }
-  .cards { grid-template-columns: 1fr; }
-  .cols { grid-template-columns: 1fr; }
+  /* minmax(0, 1fr), а не 1fr: трек `1fr` имеет авто-минимум по содержимому, и
+     длинный текст (разбор ошибки биржи) растягивал страницу до 1100px. */
+  .cards { grid-template-columns: minmax(0, 1fr); }
+  .cols { grid-template-columns: minmax(0, 1fr); }
   .mgrid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
   .quick-trade { position: static; align-items: flex-start; flex-direction: column; }
   .quick-trade input { width: 90px; }
@@ -402,17 +470,117 @@ table.mini td { text-align: right; white-space: nowrap; }
   .wt-backdrop { padding: 10px; }
   .wt-panel { max-height: 92vh; overflow-y: auto; }
   .mo-panel { max-height: 92vh; }
+
+  /* Портфель реального счёта на телефоне: карточки денег (капитал, маржа, P&L,
+     счётчик позиций) уходят под все таблицы. На 360–390px четыре карточки занимали
+     весь первый экран, и до таблиц (позиции, ордера, история) приходилось
+     прокручивать вслепую. Меняется только раскладка: порядок в DOM и на десктопе
+     прежний, поэтому на широком экране карточки по-прежнему первыми. */
+  .real-view { display: flex; flex-direction: column; }
+  .real-view > .cards { order: 10; }
+  .real-view > .foot { order: 11; }
+
+  /* Шапка на телефоне липкая, как на десктопе: портфель, режим и навигация должны
+     оставаться на виду при прокрутке. Раньше её делали нелипкой, потому что она
+     занимала 397px из 780px; теперь после сжатия (навигация — одна прокручиваемая
+     строка рядом с брендом, чип портфеля переносится, полоса режима — одна строка)
+     это ~210–235px, то есть около четверти экрана. Красная метка
+     «РЕАЛЬНЫЕ ДЕНЬГИ/СЧЁТ» в заголовке страницы (/live, /real) остаётся страховкой
+     на тот случай, если шапка перекрыта модальным окном. */
+  .app-head { padding: 2px 0 6px; }
+  /* Бренд и навигация — одна строка (экономит ~46px высоты шапки), навигация
+     прокручивается вбок, если не помещается. */
+  .topbar { gap: 6px; flex-wrap: wrap; }
+  .brand { min-height: 36px; display: inline-flex; align-items: center; flex: 0 0 auto; }
+  .nav-row {
+    flex: 1 1 0; min-width: 0; margin-left: 0; gap: 6px;
+    overflow-x: auto; padding-bottom: 2px; scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .nav-row::-webkit-scrollbar { display: none; }
+  .nav-row > * { flex: 0 0 auto; }
+  .topbar-right { width: 100%; justify-content: flex-start; gap: 6px; }
+  .api-link {
+    min-height: 38px; display: inline-flex; align-items: center;
+    padding: 7px 12px; font-size: 13px;
+  }
+  .pf-chip {
+    width: 100%; justify-content: flex-start; flex-wrap: wrap;
+    min-height: 0; padding: 6px 10px; border-radius: 12px;
+    font-size: 12px; line-height: 1.45; gap: 2px 8px;
+  }
+  .mode-switch { width: 100%; }
+  /* Полоса режима — одна строка: длинное объяснение прокручивается вбок,
+     но рамка и статус сети остаются на экране. */
+  .mode-bar {
+    flex-wrap: nowrap; white-space: nowrap; overflow-x: auto; gap: 4px;
+    padding: 4px 10px; font-size: 11px; scrollbar-width: none;
+  }
+  .mode-bar::-webkit-scrollbar { display: none; }
+  /* Ссылки внутри полосы режима — не подчёркивания в тексте, а отдельные цели пальцем. */
+  .mode-bar-link, .mode-bar a {
+    min-height: 34px; display: inline-flex; align-items: center; flex: 0 0 auto;
+  }
+
+  /* — Формы (/api: ключ, секрет, сеть) — */
+  .apiform label { flex-direction: column; align-items: stretch; gap: 6px; }
+  .apiform input, .apiform select { width: 100%; }
+  /* Поля ввода — 44px и шрифт 16px: ниже 16px iOS зумит страницу при фокусе.
+     Галочки из правила исключены — у них свой размер, нажимается подпись. */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select, textarea {
+    font-size: 16px;
+    min-height: 44px;
+  }
+  input[type="checkbox"], input[type="radio"], label.check input[type="checkbox"] {
+    width: 20px; height: 20px; flex: 0 0 auto; accent-color: var(--accent);
+  }
+  /* Нажимается вся подпись, а не только квадратик 20px: «Я понимаю: это реальные
+     деньги» на /live и «Показать введённый секрет» на /api — осознанные решения. */
+  label.check, label:has(> input[type="checkbox"]) { min-height: 40px; }
+  .back { min-height: 40px; display: inline-flex; align-items: center; }
+
+  /* — Кнопки-действия у денег: пальцем нужно попасть с первого раза — */
+  .btn, .btn-sm { min-height: 40px; padding: 9px 14px; }
+  .icon-btn, .icon-link { width: 38px; height: 38px; }
+  .controls .btn { flex: 1 1 auto; }
+
+  /* — Таблицы: переносим текст вместо горизонтального скролла, колонка пары закреплена — */
+  .table-wrap { border-radius: 12px; }
+  .table-wrap th, .table-wrap td { padding: 8px 8px; font-size: 12px; white-space: normal; }
+  .table-wrap td.sym, .table-wrap .pair-link { white-space: nowrap; }
+  /* Ссылка на биржу в строке — цель пальцем во всю высоту ячейки, а не 15px текста. */
+  .table-wrap .pair-link { display: inline-block; padding: 6px 0; }
+  .table-actions .btn { width: 100%; }
+
+  /* — Тексты ошибок и подсказок не должны распирать карточки — */
+  .state, .sub, .card, .detail { overflow-wrap: anywhere; }
+  .detail { padding: 10px; }
+  .detail-head { flex-wrap: wrap; gap: 6px; }
+
+  /* — Ссылка на биржу и ссылки внутри текста: в заголовке — цель в строку заголовка,
+     в тексте — с полями, иначе это 14px текста, в который палец не попадёт. — */
+  h1 .pair-link, .pair-link-text {
+    display: inline-flex; align-items: center; min-height: 32px;
+  }
+  p a, .sub a, .state a, li a, .foot a, .ext { display: inline-block; padding: 5px 0; }
+  .ext { min-height: 30px; display: inline-flex; align-items: center; }
+  .signal-main { flex-wrap: wrap; gap: 8px; }
 }
 
 @media (max-width: 480px) {
   body { font-size: 14px; }
-  .api-link { padding: 5px 8px; font-size: 12px; }
   .brand { font-size: 13px; }
-  .pf-chip { padding: 4px 10px; font-size: 12px; }
   .state, .sub { font-size: 12px; }
-  th, td { padding: 6px 6px; font-size: 12px; }
-  .btn { padding: 7px 10px; }
+  .btn { padding: 9px 12px; }
   .lvl { font-size: 13px; }
   .slice { padding: 8px; }
   .slices { gap: 8px; }
+  /* Пара «подпись — значение» в одну строку не помещается: подпись сверху, значение
+     под ним во всю ширину (иначе длинные значения — отпечаток ключа, описание часов —
+     обрезаются или сталкиваются). */
+  .lvl { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .lvl b { max-width: 100%; }
+  th, td { padding: 8px 6px; font-size: 12px; }
+  .env-badge { font-size: 10px; padding: 2px 6px; }
 }

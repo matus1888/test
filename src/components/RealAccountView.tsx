@@ -141,7 +141,10 @@ export default function RealAccountView({ api }: Props) {
   const realized = wallet.totalWalletBalance > 0 ? wallet.totalEquity - wallet.totalWalletBalance - upl : 0;
 
   return (
-    <>
+    // Контейнер нужен для мобильной раскладки: на телефоне карточки денег
+    // (капитал, маржа, P&L, счётчик позиций) уходят под все таблицы — см. .real-view
+    // в index.css. Порядок в DOM и на десктопе не меняется.
+    <div className="real-view">
       {confirmDialog}
       <section className="cards">
         <div className="card">
@@ -194,7 +197,7 @@ export default function RealAccountView({ api }: Props) {
         <p className="state">Позиций нет. Открыть реальную сделку можно на странице <Link to="/live">«Live»</Link>.</p>
       ) : (
         <div className="table-wrap">
-          <table>
+          <table className="pin-right">
             <thead>
               <tr>
                 <th>Символ</th>
@@ -207,8 +210,8 @@ export default function RealAccountView({ api }: Props) {
                 <th><Term t="risk" label="Риск" /></th>
                 <th>Liq</th>
                 <th>SL / TP</th>
-                <th>uP&L</th>
-                <th></th>
+                <th className="upl">uP&L</th>
+                <th className="act"></th>
               </tr>
             </thead>
             <tbody>
@@ -230,10 +233,10 @@ export default function RealAccountView({ api }: Props) {
                   <td className="muted">
                     {p.stopLoss ? pxFmt(p.stopLoss) : '—'} / {p.takeProfit ? pxFmt(p.takeProfit) : '—'}
                   </td>
-                  <td className={p.unrealisedPnl > 0 ? 'pos' : p.unrealisedPnl < 0 ? 'neg' : ''}>
+                  <td className={`upl ${p.unrealisedPnl > 0 ? 'pos' : p.unrealisedPnl < 0 ? 'neg' : ''}`}>
                     {p.unrealisedPnl >= 0 ? '+' : ''}{fmt(p.unrealisedPnl, 2)} $
                   </td>
-                  <td>
+                  <td className="act">
                     <div className="pos-actions">
                       <button
                         type="button"
@@ -385,6 +388,6 @@ export default function RealAccountView({ api }: Props) {
         Занятая маржа ({fmtCompact(wallet.totalInitialMargin)} $) — именно эти деньги депозита заблокированы под сделки;
         торговый номинал позиций в разы больше ({fmtCompact(livePositions.reduce((a, p) => a + p.size * p.markPrice, 0))} $).
       </footer>
-    </>
+    </div>
   );
 }

@@ -338,7 +338,7 @@ export default function ScreenerPage() {
       )}
 
       <div className="table-wrap">
-        <table>
+        <table className="wide">
           <thead>
             <tr>
               {COLUMNS.map((c) => (

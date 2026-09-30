@@ -227,7 +227,7 @@ export default function PaperPage() {
             </div>
           )}
           <div className="table-wrap">
-          <table>
+          <table className="pin-right">
             <thead>
               <tr>
                 <th>Символ</th>
@@ -237,7 +237,7 @@ export default function PaperPage() {
                 <th>Из депозита в сделке</th>
                 <th><Term t="pnl" label="P&L" /></th>
                 <th>Статус</th>
-                <th></th>
+                <th className="act"></th>
               </tr>
             </thead>
             <tbody>
@@ -330,7 +330,7 @@ export default function PaperPage() {
                         </>
                       )}
                     </td>
-                    <td>
+                    <td className="act">
                       {p.status === 'open' && (
                         <button
                           className="btn btn-sm"

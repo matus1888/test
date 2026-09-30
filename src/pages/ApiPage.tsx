@@ -1,10 +1,15 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   clearCredentials,
+  CLOCK_EVENT,
+  clockInfo,
+  credentialFingerprint,
+  describeClock,
   devCredentials,
   hasStoredCredentials,
   saveCredentials,
+  syncClock,
   type ApiCredentials,
 } from '../api/privateApi';
 import { useApiAccount } from '../hooks/useApiAccount';
@@ -27,6 +32,31 @@ export default function ApiPage() {
   const [secret, setSecret] = useState(() => dev?.secret ?? '');
   const [testnet, setTestnet] = useState(() => dev?.testnet ?? false);
   const [formError, setFormError] = useState<string | null>(null);
+  // Показать секрет открытым текстом: на телефоне иначе не сверить символы при вставке.
+  const [showSecret, setShowSecret] = useState(false);
+  // Правка ключа/сети при уже сохранённом ключе: раньше сеть менялась только после
+  // удаления ключей, а на телефоне это лишний шаг и повод набрать ключ заново.
+  const [editing, setEditing] = useState(false);
+  // Отпечаток ключа (12 символов подписи от секрета): позволяет прислать «слепок»
+  // ключа для сверки, не показывая сам секрет. Пересчитывается при смене ключей.
+  const [fp, setFp] = useState('');
+  useEffect(() => {
+    if (!api.cred) return;
+    let alive = true;
+    void credentialFingerprint(api.cred).then((f) => { if (alive) setFp(f.fp); });
+    return () => { alive = false; };
+  }, [api.cred]);
+  // Смещение часов устройства относительно биржи — причина ошибок 10002.
+  const [clock, setClock] = useState(() => clockInfo());
+  // Сверка часов идёт в фоне (старт приложения, первый приватный запрос, кнопка
+  // «Сохранить и проверить»), поэтому перечитываем состояние по событию модуля часов —
+  // иначе строка вечно показывала «не проверялось».
+  useEffect(() => {
+    const onClock = () => setClock(clockInfo());
+    window.addEventListener(CLOCK_EVENT, onClock);
+    onClock();
+    return () => window.removeEventListener(CLOCK_EVENT, onClock);
+  }, []);
   // «Не сохранять ключ» — только в память вкладки (сессия). Дефолт из sessionStorage.
   const [sessionOnly, setSessionOnly] = useSessionState<boolean>('api:sessionKeys', false, isBool);
 
@@ -49,12 +79,28 @@ export default function ApiPage() {
     if (dev == null || k !== dev.key || s !== dev.secret || testnet !== dev.testnet) {
       saveCredentials({ key: k, secret: s, testnet }, !sessionOnly);
     }
+    // Часы телефона могут быть сбиты (10002 на любой приватный запрос) — выравниваем
+    // о время биржи ДО проверки подключения, и показываем результат пользователю.
+    void syncClock(testnet, true).then(() => setClock(clockInfo()));
+    setEditing(false);
     api.reload();
+  };
+
+  /** Открыть форму правки с текущими значениями (ключ не удаляется). */
+  const startEdit = () => {
+    const cur = cred ?? dev;
+    setKey(cur?.key ?? '');
+    setSecret(cur?.secret ?? '');
+    setTestnet(cur?.testnet ?? false);
+    setFormError(null);
+    setEditing(true);
   };
 
   const remove = () => {
     clearCredentials();
     setFormError(null);
+    setEditing(false);
+    setFp('');
     setKey(dev?.key ?? '');
     setSecret(dev?.secret ?? '');
     setTestnet(dev?.testnet ?? false);
@@ -88,20 +134,77 @@ export default function ApiPage() {
             </b>
           </div>
           {cred && (
-            <div className="lvl"><span>API-key</span><b className="muted">{cred.key.slice(0, 8)}…{cred.key.slice(-4)}</b></div>
+            <div className="lvl">
+              <span>API-key</span><b className="muted">{cred.key.slice(0, 8)}…{cred.key.slice(-4)}</b>
+            </div>
+          )}
+          {cred && (
+            <div className="lvl">
+              <span>Отпечаток ключа</span>
+              <b className="muted">
+                {cred.key.slice(0, 6)}…{cred.key.slice(-4)} · {cred.testnet ? 'тестнет' : 'мейннет'} · секрет {fp || '—'}
+                {fp ? (
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => {
+                      const line = `${cred.key} · ${cred.testnet ? 'тестнет' : 'мейннет'} · секрет ${fp}`;
+                      void navigator.clipboard?.writeText(line);
+                    }}
+                  >
+                    Скопировать
+                  </button>
+                ) : null}
+              </b>
+            </div>
+          )}
+          {cred && (
+            <div className="lvl">
+              <span>Время устройства <Term t="timeSync" /></span>
+              <b className={clock.synced ? 'muted' : 'neg'}>{describeClock(clock)}</b>
+            </div>
           )}
           {fromEnv && (
             <div className="lvl"><span>Источник</span><b className="muted">.env (локальный dev-сервер) · подключение проверяется автоматически</b></div>
           )}
         </div>
-        {!cred ? (
+        {!cred || editing ? (
           <div className="card apiform">
             <h3>Ввод ключей</h3>
             <label>API Key
-              <input name="apiKey" type="text" autoComplete="off" value={key} placeholder="Z7... (публичная часть)" onChange={(e) => setKey(e.target.value)} />
+              <input
+                name="apiKey"
+                type="text"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                inputMode="text"
+                value={key}
+                placeholder="Z7... (публичная часть)"
+                onChange={(e) => setKey(e.target.value)}
+              />
+              <span className="muted">символов: {key.length} — сверь с биржей: обрезка при вставке — самая частая причина отказа</span>
             </label>
             <label>API Secret
-              <input name="apiSecret" type="password" autoComplete="off" value={secret} placeholder="только подпись, хранится в браузере" onChange={(e) => setSecret(e.target.value)} />
+              {/* type переключается галочкой: на телефоне невозможно сверить символы
+                  при вставке, а ошибка в одной букве даёт 10004 «sign error». */}
+              <input
+                name="apiSecret"
+                type={showSecret ? 'text' : 'password'}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                inputMode="text"
+                value={secret}
+                placeholder="только подпись, хранится в браузере"
+                onChange={(e) => setSecret(e.target.value)}
+              />
+              <span className="muted">символов: {secret.length} — регистр важен, сверь посимвольно с биржей</span>
+            </label>
+            <label className="check">
+              <input type="checkbox" name="showSecret" checked={showSecret} onChange={(e) => setShowSecret(e.target.checked)} />
+              Показать введённый секрет
             </label>
             <label>Сеть
               <select name="apiNet" value={testnet ? 1 : 0} onChange={(e) => setTestnet(e.target.value === '1')}>
@@ -141,9 +244,18 @@ export default function ApiPage() {
               <button className="btn" onClick={api.reload} disabled={busy}>
                 {busy ? 'Проверка…' : 'Проверить подключение'}
               </button>
+              <button className="btn" onClick={startEdit}>Изменить ключ или сеть</button>
               <button className="btn btn-danger" onClick={remove}>Удалить ключи</button>
             </div>
             {dev && <p className="muted">После удаления ключи из <b>.env</b> подставятся снова — это поведение нужно только локально.</p>}
+            <p className="state">
+              Ошибка <b>retCode 10002</b> — приложение разбирает её по числам из ответа биржи
+              (<b>req_timestamp</b> / <b>server_timestamp</b> / <b>recv_window</b>), поэтому в сообщении
+              будет сказано прямо: виновато время или нет. Если метка внутри окна, значит время
+              исправно, и причина в ключе: он введён не полностью, с опечаткой, от другого аккаунта
+              или от другого стенда (тестнет/мейннет). Часы при этом всё равно сверяются с биржей
+              автоматически — на случай сбитого времени телефона.
+            </p>
           </div>
         )}
       </section>
