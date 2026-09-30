@@ -199,12 +199,12 @@ export default function ScreenerPage() {
     quickEntry(r);
   };
 
-  /** Вход по рынку из строки. В реальном режиме кнопки нет: настоящий рыночный ордер
-   *  отправляется только с /live, поэтому ведём на форму ордера, как и лимитный вход. */
+  /** Вход по рынку из строки. В реальном режиме ведём на /live в режиме «по рынку»
+   *  (`&kind=market`) — сам рыночный ордер отправляется только с /live после подтверждения. */
   const marketEntryAction = (r: Row) => {
     if (!r.plan) return;
     if (real) {
-      navigate(liveHref(r.symbol, interval));
+      navigate(liveHref(r.symbol, interval, 'market'));
       return;
     }
     quickEntry(r, 'market');
@@ -375,6 +375,11 @@ export default function ScreenerPage() {
                         ? 'Реальный режим: откроет форму ордера на /live. Рыночный ордер отправляется только оттуда и только после подтверждения'
                         : 'Вход по рынку: исполнение сразу по текущей цене, без ожидания отката. Риск в $ тот же, дистанция до стопа больше. Проскальзывание в бумаге не учитывается'}
                     >{real ? 'Реальный →' : 'По рынку'}</button>
+                  )}
+                  {r.plan && r.plan.direction !== 'wait' && r.plan.riskDist > 0 && (
+                    <span className="muted quick-margin">
+                      риск {fmt(riskMoney)} $ · маржа ≈{fmt(riskMoney / r.plan.riskDist * r.plan.entryMid / lev, 0)} $
+                    </span>
                   )}
                 </td>
                 <td>{r.confidence == null ? '—' : `${r.confidence}%`}</td>

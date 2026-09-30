@@ -3,11 +3,13 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   CREDENTIALS_EVENT,
   fetchActiveOrders,
+  fetchExecutions,
   fetchPositions,
   fetchWalletBalance,
   loadCredentials,
   type ActiveOrder,
   type ApiCredentials,
+  type ApiExecution,
   type ApiPosition,
   type WalletBalance,
 } from '../api/privateApi';
@@ -23,6 +25,11 @@ import {
   pushFill,
   type ApiFill,
 } from '../lib/accountStream';
+import {
+  loadRealHistory,
+  mergeExecutions,
+  saveRealHistory,
+} from '../lib/realHistory';
 
 /** Снимок реального счёта: кошелёк, позиции и висящие ордера одним запросом. */
 export interface ApiAccount {
@@ -89,11 +96,15 @@ export function useApiAccount(): ApiAccountView {
   const q = useQuery({
     queryKey,
     queryFn: async (): Promise<ApiAccount> => {
-      const [wallet, positions, orders] = await Promise.all([
+      const [wallet, positions, orders, executions] = await Promise.all([
         fetchWalletBalance(cred!),
         fetchPositions(cred!),
         fetchActiveOrders(cred!),
+        fetchExecutions(cred!, 'linear', 50),
       ]);
+      // REST-исполнения → localStorage-история реальных сделок (дедуп по execId).
+      // Живая лента /live хранит их в памяти вкладки; здесь — персистентная страховка.
+      addExecutionsToHistory(executions);
       return { wallet, positions, orders, fills: [], at: Date.now(), live: false };
     },
     enabled: cred != null,
@@ -220,4 +231,19 @@ function rowsOf<T>(data: unknown, parse: (row: unknown) => T | null): T[] {
     if (parsed) out.push(parsed);
   }
   return out;
+}
+
+/** Персистентная история реальных сделок: REST-исполнения → localStorage (дедуп по execId). */
+function addExecutionsToHistory(executions: ApiExecution[]): void {
+  if (executions.length === 0) return;
+  try {
+    const merged = mergeExecutions(loadRealHistory(), executions);
+    const prev = loadRealHistory();
+    const same = merged.length === prev.length && merged.every((t, i) => t.execId === prev[i]?.execId);
+    if (!same) {
+      saveRealHistory(merged);
+      // Оповещаем страницы/хук — история обновилась.
+      import('../lib/realHistory').then((m) => m.emitRealHistoryChanged());
+    }
+  } catch { /* localStorage недоступен — пропускаем, лента в памяти остаётся */ }
 }

@@ -110,6 +110,14 @@ tbody tr:hover { background: #171b22; }
 tr.sel { background: #1a2436 !important; }
 td.sym { font-weight: 600; }
 .table-wrap table.tf-table { min-width: 620px; }
+/* Шапка (бренд + чип портфеля + полоса режима) прилипает к верху на всех экранах:
+   портфель и индикатор соединения всегда на виду, выше остальных элементов управления. */
+.app-head {
+  position: sticky; top: 0; z-index: 400;
+  background: var(--bg);
+  padding: 6px 0 8px;
+  border-bottom: 1px solid var(--border);
+}
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 0 0; }
 .topbar-right { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .brand { font-weight: 800; font-size: 15px; color: var(--text); text-decoration: none; }
@@ -141,6 +149,7 @@ td.sym { font-weight: 600; }
 .pf-chip.real:hover { border-color: var(--neg); }
 .quick-entry.real { border-color: var(--neg); color: #f0a3a1; }
 .quick-entry.real:hover { background: rgba(239, 83, 80, 0.12); border-color: var(--neg); }
+.quick-margin { display: block; font-size: 0.78em; margin-top: 3px; line-height: 1.3; }
 .quick-trade .quick-open-real { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; }
 .quick-trade .quick-open-real { text-decoration: none; }
 
@@ -152,6 +161,20 @@ td.sym { font-weight: 600; }
 .pf-chip:hover { border-color: var(--accent); }
 .pf-chip b.pos { color: var(--pos); }
 .pf-chip b.neg { color: var(--neg); }
+.pf-chip .ws-badge { margin-left: 4px; }
+.pf-chip.real .ws-badge:not(.live) { color: #f0a3a1; }
+
+/* Иконки-действия в таблицах (закрыть по рынку, управлять) */
+.pos-actions { display: inline-flex; align-items: center; gap: 6px; }
+.icon-btn, .icon-link {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--panel);
+  color: var(--muted); cursor: pointer; text-decoration: none;
+}
+.icon-btn:hover, .icon-link:hover { border-color: var(--neg); color: #f0a3a1; }
+.icon-link:hover { border-color: var(--accent); color: var(--text); }
+.icon-btn:disabled { opacity: 0.5; cursor: default; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 .table-actions {
   display: flex;

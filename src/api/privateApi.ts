@@ -155,6 +155,7 @@ export async function requestPrivate<T>(
   path: string,
   params: Record<string, unknown> = {},
   cred: ApiCredentials,
+  opts: { ignoreRetCodes?: number[] } = {},
 ): Promise<T> {
   const timestamp = String(Date.now());
   let url = `${apiBase(cred.testnet)}${path}`;
@@ -188,6 +189,9 @@ export async function requestPrivate<T>(
     throw new Error(`HTTP ${response.status} (${text.slice(0, 120)})`);
   }
   if (j.retCode !== 0) {
+    // 110043 «leverage not modified» — целевое плечо уже установлено, это не ошибка:
+    // повторный вызов с тем же значением не меняет состояние счёта.
+    if (opts.ignoreRetCodes?.includes(j.retCode)) return j.result;
     // retCode 10002/10004 — «invalid request/signature»: чаще всего неверный ключ или время.
     const hint = j.retCode === 10002 || j.retCode === 10004 ? ' — проверь ключ/секрет и синхронизацию времени' : '';
     throw new Error(`${j.retMsg} (retCode ${j.retCode})${hint}`);
@@ -214,6 +218,10 @@ export interface CoinBalance {
   equity: number;
   availableToWithdraw: number;
   usdValue: number;
+  /** Маржа под позициями этой монеты (Bybit шлёт здесь, а не в полях аккаунта). */
+  positionIM: number;
+  /** Маржа под висящими ордерами этой монеты. */
+  orderIM: number;
 }
 
 export interface WalletBalance {
@@ -232,7 +240,13 @@ export interface WalletBalance {
 }
 
 export async function fetchWalletBalance(cred: ApiCredentials, accountType = 'UNIFIED'): Promise<WalletBalance> {
-  const res = await requestPrivate<{
+  // Bybit V5 отдаёт баланс как массив аккаунтов (`result.list`), агрегированные поля —
+  // в `list[0]`, а монеты — в `list[0].coin`. Проверено живым ответом: без этого
+  // уровня totalEquity/кошелёк читаются как 0, и счёт с деньгами показывал «0 $».
+  // Маржу (IM = initial margin) Bybit шлёт НЕ в полях аккаунта (totalInitialMargin и
+  // totalAvailableBalance приходят пустыми «»), а внутри каждой монеты:
+  // coin[].totalPositionIM / coin[].totalOrderIM. Собираем её вручную.
+  interface WalletAccount {
     accountType: string;
     totalEquity: string;
     totalWalletBalance: string;
@@ -242,26 +256,43 @@ export async function fetchWalletBalance(cred: ApiCredentials, accountType = 'UN
     totalInitialMargin?: string;
     totalPositionInitialMargin?: string;
     totalOrderInitialMargin?: string;
-    list?: { coin: string; walletBalance: string; equity: string; availableToWithdraw: string; usdValue: string }[];
-  }>('GET', '/v5/account/wallet-balance', { accountType }, cred);
+    coin?: {
+      coin: string; walletBalance: string; equity: string;
+      availableToWithdraw: string; usdValue: string;
+      totalPositionIM?: string; totalOrderIM?: string;
+    }[];
+  }
+  const res = await requestPrivate<{ list?: WalletAccount[] }>('GET', '/v5/account/wallet-balance', { accountType }, cred);
+  const acc: WalletAccount = res.list?.[0] ?? {
+    accountType, totalEquity: '', totalWalletBalance: '', totalMarginBalance: '',
+    totalAvailableBalance: '', totalPerpUPL: '', totalInitialMargin: '',
+    totalPositionInitialMargin: '', totalOrderInitialMargin: '', coin: [],
+  };
   const num = (v?: string | number) => Number(v ?? 0);
+  const coins: CoinBalance[] = (acc.coin ?? []).map((c) => ({
+    coin: c.coin,
+    walletBalance: num(c.walletBalance),
+    equity: num(c.equity),
+    availableToWithdraw: num(c.availableToWithdraw),
+    usdValue: num(c.usdValue),
+    positionIM: num(c.totalPositionIM),
+    orderIM: num(c.totalOrderIM),
+  }));
+  const positionIM = coins.reduce((a, c) => a + c.positionIM, 0);
+  const orderIM = coins.reduce((a, c) => a + c.orderIM, 0);
+  const initialMargin = positionIM + orderIM;
+  const equity = num(acc.totalEquity);
   return {
-    accountType: res.accountType,
-    totalEquity: num(res.totalEquity),
-    totalWalletBalance: num(res.totalWalletBalance),
-    totalMarginBalance: num(res.totalMarginBalance),
-    totalAvailableBalance: num(res.totalAvailableBalance),
-    totalPerpUPL: num(res.totalPerpUPL),
-    totalInitialMargin: num(res.totalInitialMargin),
-    totalPositionInitialMargin: num(res.totalPositionInitialMargin),
-    totalOrderInitialMargin: num(res.totalOrderInitialMargin),
-    coins: (res.list ?? []).map((c) => ({
-      coin: c.coin,
-      walletBalance: num(c.walletBalance),
-      equity: num(c.equity),
-      availableToWithdraw: num(c.availableToWithdraw),
-      usdValue: num(c.usdValue),
-    })),
+    accountType: acc.accountType,
+    totalEquity: equity,
+    totalWalletBalance: num(acc.totalWalletBalance),
+    totalMarginBalance: num(acc.totalMarginBalance) || equity,
+    totalAvailableBalance: num(acc.totalAvailableBalance) || Math.max(0, equity - initialMargin),
+    totalPerpUPL: num(acc.totalPerpUPL),
+    totalInitialMargin: num(acc.totalInitialMargin) || initialMargin,
+    totalPositionInitialMargin: num(acc.totalPositionInitialMargin) || positionIM,
+    totalOrderInitialMargin: num(acc.totalOrderInitialMargin) || orderIM,
+    coins,
   };
 }
 
@@ -308,13 +339,14 @@ export interface SetLeverageArgs {
 }
 
 export async function setLeverage(cred: ApiCredentials, args: SetLeverageArgs): Promise<void> {
+  // 110043 «leverage not modified» — плечо уже такое, повторное совпадение не меняет счёт.
   await requestPrivate('POST', '/v5/position/set-leverage', {
     category: args.category,
     symbol: args.symbol,
     buyLeverage: String(args.leverage),
     sellLeverage: String(args.leverage),
     ...(args.positionIdx != null ? { positionIdx: args.positionIdx } : {}),
-  }, cred);
+  }, cred, { ignoreRetCodes: [110043] });
 }
 
 export interface PlaceOrderArgs {
@@ -406,8 +438,10 @@ export async function fetchActiveOrders(cred: ApiCredentials, category: Category
   })).filter((o) => o.orderStatus.toLowerCase() !== 'cancelled' && o.orderStatus.toLowerCase() !== 'canceled' && o.orderStatus.toLowerCase() !== 'rejected'); // Bybit пишет «Cancelled» с двумя l
 }
 
-export async function cancelOrder(cred: ApiCredentials, category: Category, orderId: string): Promise<void> {
-  await requestPrivate('POST', '/v5/order/cancel', { category, orderId }, cred);
+export async function cancelOrder(cred: ApiCredentials, category: Category, orderId: string, symbol: string): Promise<void> {
+  // Bybit требует symbol у /v5/order/cancel: без него — 10001 params error: symbol invalid
+  // (проверено живым запросом на mainnet 30.09.2026 — кнопка «Отменить» не снимала ордер).
+  await requestPrivate('POST', '/v5/order/cancel', { category, symbol, orderId }, cred);
 }
 
 /** Установить позиционный TP/SL (например, перенести стоп в безубыток после TP1). */
@@ -432,4 +466,45 @@ export async function setPositionTradingStop(
     ...(args.tpTriggerBy ? { tpTriggerBy: args.tpTriggerBy } : {}),
     ...(args.positionIdx != null ? { positionIdx: args.positionIdx } : {}),
   }, cred);
+}
+
+/** Одно исполнение (филла) из истории `/v5/execution/list`. */
+export interface ApiExecution {
+  execId: string;
+  orderId: string;
+  symbol: string;
+  side: 'Buy' | 'Sell';
+  qty: number;
+  price: number;
+  fee: number;
+  execPnl: number;
+  execType: string;
+  execTime: number;
+  orderType: string;
+  orderLinkId?: string;
+}
+
+/**
+ * История исполнений (закрытые/частичные филлы). Bybit хранит ограниченную глубину —
+ * поэтому стор честно говорит «сколько видит биржа», а не «вся история».
+ * Так же читает лента на /live; здесь — REST-страховка и первичное наполнение.
+ */
+export async function fetchExecutions(cred: ApiCredentials, category: Category = 'linear', limit = 50): Promise<ApiExecution[]> {
+  const res = await requestPrivate<{ list?: Record<string, string>[] }>(
+    'GET', '/v5/execution/list', { category, settleCoin: 'USDT', limit: String(limit) }, cred,
+  );
+  return (res.list ?? []).map((e) => ({
+    execId: String(e.execId ?? ''),
+    orderId: String(e.orderId ?? ''),
+    symbol: String(e.symbol ?? ''),
+    side: (String(e.side ?? '') || 'Buy') as ApiExecution['side'],
+    qty: Number(e.execQty ?? 0),
+    price: Number(e.execPrice ?? 0),
+    fee: Number(e.execFee ?? 0),
+    execPnl: Number(e.execPnl ?? 0),
+    execType: String(e.execType ?? ''),
+    execTime: Number(e.execTime ?? 0),
+    orderType: String(e.orderType ?? ''),
+    orderLinkId: e.orderLinkId ? String(e.orderLinkId) : undefined,
+  })).filter((e) => e.execId && e.symbol);
 }

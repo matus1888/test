@@ -13,6 +13,7 @@ import {
   parseDevCredentials,
   requestPrivate,
   saveCredentials,
+  setLeverage,
 } from '../src/api/privateApi';
 
 afterEach(() => {
@@ -131,31 +132,84 @@ describe('широкие запросы без symbol (живая проверк
     await cancelAll(cred, 'linear', 'BTCUSDT');
     expect(s.body).toBe(JSON.stringify({ category: 'linear', symbol: 'BTCUSDT' }));
   });
+
+  it('set-leverage: 110043 «leverage not modified» не считается ошибкой (плечо уже такое)', async () => {
+    const state: { body?: string } = {};
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      state.body = init.body ? String(init.body) : undefined;
+      return { ok: true, text: async () => JSON.stringify({ retCode: 110043, retMsg: 'leverage not modified', result: {} }) };
+    }));
+    const k = { key: 'K', secret: 'S', testnet: false };
+    await expect(setLeverage(k, { category: 'linear', symbol: 'BTCUSDT', leverage: 5 })).resolves.toBeUndefined();
+    expect(state.body).toContain('"buyLeverage":"5"');
+    expect(state.body).toContain('"sellLeverage":"5"');
+  });
 });
 
 describe('wallet / credentials', () => {
-  it('fetchWalletBalance парсит result', async () => {
+  it('fetchWalletBalance парсит result (list[0] — аккаунт, list[0].coin — монеты)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
       text: async () => JSON.stringify({
         retCode: 0,
         retMsg: 'OK',
         result: {
-          accountType: 'UNIFIED',
-          totalEquity: '1234.5',
-          totalWalletBalance: '1200',
-          totalMarginBalance: '300',
-          list: [{ coin: 'USDT', walletBalance: '1200', equity: '1234.5', availableToWithdraw: '900', usdValue: '1234.5' }],
+          list: [{
+            accountType: 'UNIFIED',
+            totalEquity: '1234.5',
+            totalWalletBalance: '1200',
+            totalMarginBalance: '300',
+            coin: [{ coin: 'USDT', walletBalance: '1200', equity: '1234.5', availableToWithdraw: '900', usdValue: '1234.5' }],
+          }],
         },
       }),
     })));
     const w = await fetchWalletBalance({ key: 'K', secret: 'S', testnet: false });
+    expect(w.accountType).toBe('UNIFIED');
     expect(w.totalEquity).toBe(1234.5);
+    expect(w.totalWalletBalance).toBe(1200);
     expect(w.coins[0]).toMatchObject({ coin: 'USDT', walletBalance: 1200 });
     // Поля маржи и uP&L: если биржа их не прислала — нули, не NaN (страница /real их рисует).
     expect(w.totalPerpUPL).toBe(0);
     expect(w.totalInitialMargin).toBe(0);
-    expect(w.totalAvailableBalance).toBe(0);
+    // Доступно не пришло — считаем от equity минус занятая маржа (0).
+    expect(w.totalAvailableBalance).toBe(1234.5);
+  });
+
+  it('fetchWalletBalance: маржа из coin[].totalPositionIM/totalOrderIM, когда поля аккаунта пусты', async () => {
+    // Bybit для UNIFIED шлёт IM внутри монет, а totalInitialMargin/available — пустыми («»).
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      text: async () => JSON.stringify({
+        retCode: 0,
+        retMsg: 'OK',
+        result: {
+          list: [{
+            accountType: 'UNIFIED',
+            totalEquity: '211.6',
+            totalWalletBalance: '209.8',
+            totalMarginBalance: '',
+            totalAvailableBalance: '',
+            totalPerpUPL: '1.8',
+            totalInitialMargin: '',
+            totalPositionInitialMargin: '',
+            totalOrderInitialMargin: '',
+            coin: [{
+              coin: 'USDT', walletBalance: '209.8', equity: '211.6',
+              availableToWithdraw: '', usdValue: '211.6',
+              totalPositionIM: '38.5', totalOrderIM: '1.2',
+            }],
+          }],
+        },
+      }),
+    })));
+    const w = await fetchWalletBalance({ key: 'K', secret: 'S', testnet: false });
+    expect(w.totalEquity).toBe(211.6);
+    expect(w.totalInitialMargin).toBeCloseTo(39.7, 1); // 38.5 позиции + 1.2 ордера
+    expect(w.totalPositionInitialMargin).toBeCloseTo(38.5, 1);
+    expect(w.totalOrderInitialMargin).toBeCloseTo(1.2, 1);
+    expect(w.totalAvailableBalance).toBeCloseTo(171.9, 1); // equity − маржа
+    expect(w.coins[0]).toMatchObject({ positionIM: 38.5, orderIM: 1.2 });
   });
 
   it('fetchWalletBalance парсит маржу и нереализованный P&L', async () => {
@@ -165,16 +219,18 @@ describe('wallet / credentials', () => {
         retCode: 0,
         retMsg: 'OK',
         result: {
-          accountType: 'UNIFIED',
-          totalEquity: '1010',
-          totalWalletBalance: '1000',
-          totalMarginBalance: '10',
-          totalAvailableBalance: '990',
-          totalPerpUPL: '10',
-          totalInitialMargin: '55',
-          totalPositionInitialMargin: '50',
-          totalOrderInitialMargin: '5',
-          list: [],
+          list: [{
+            accountType: 'UNIFIED',
+            totalEquity: '1010',
+            totalWalletBalance: '1000',
+            totalMarginBalance: '10',
+            totalAvailableBalance: '990',
+            totalPerpUPL: '10',
+            totalInitialMargin: '55',
+            totalPositionInitialMargin: '50',
+            totalOrderInitialMargin: '5',
+            coin: [],
+          }],
         },
       }),
     })));
@@ -185,6 +241,7 @@ describe('wallet / credentials', () => {
       totalPositionInitialMargin: 50,
       totalOrderInitialMargin: 5,
       totalAvailableBalance: 990,
+      totalEquity: 1010,
     });
   });
 

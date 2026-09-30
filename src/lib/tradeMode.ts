@@ -59,9 +59,10 @@ export const MODE_HINTS: Record<TradeMode, string> = {
 };
 
 /** Ссылка «перейти к реальному входу» из скринера и плана символа. */
-export function liveHref(symbol: string, interval: string): string {
+export function liveHref(symbol: string, interval: string, kind: 'limit' | 'market' = 'limit'): string {
   const s = symbol.trim().toUpperCase();
-  return `/live?symbol=${encodeURIComponent(s)}&interval=${encodeURIComponent(interval)}`;
+  const kindParam = kind === 'market' ? '&kind=market' : '';
+  return `/live?symbol=${encodeURIComponent(s)}&interval=${encodeURIComponent(interval)}${kindParam}`;
 }
 
 /** Символ и таймфрейм из такой ссылки — предзаполнение формы реального ордера. */

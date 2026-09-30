@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { closeAllReal, openReal, planLadder, roundDownToStep, roundToTick, type InstrumentInfo } from '../src/api/live';
+import { closeAllReal, openReal, openRealMarket, placeLadder, planLadder, roundDownToStep, roundToTick, type InstrumentInfo } from '../src/api/live';
 import type { TradePlan } from '../src/lib/tradePlan';
 
 const plan = (over: Partial<TradePlan> = {}): TradePlan => ({
@@ -55,7 +55,7 @@ describe('округление', () => {
 });
 
 describe('openReal', () => {
-  it('плечо → лимитный вход со стопом → reduce-only TP1/TP2/TP3', async () => {
+  it('плечо → лимитный вход со стопом, БЕЗ reduce-only TP (они ставятся после открытия позиции)', async () => {
     const calls: { path: string; body: string }[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
       const u = new URL(String(url));
@@ -87,23 +87,45 @@ describe('openReal', () => {
     expect(entry.body).toContain('"timeInForce":"GTC"');
     expect(entry.body).not.toContain('"reduceOnly":true');
 
-    const tps = calls.slice(3);
-    expect(tps).toHaveLength(3);
-    expect(tps[0].body).toContain('"qty":"70"');
-    expect(tps[0].body).toContain('"price":"110.00000000"');
-    expect(tps[1].body).toContain('"qty":"20"');
-    expect(tps[1].body).toContain('"price":"120.00000000"');
-    expect(tps[2].body).toContain('"qty":"10"');
-    expect(tps[2].body).toContain('"price":"130.00000000"');
-    for (const tp of tps) {
+    // Вход один, TP-ордера не ставятся (позиции ещё нет — reduceOnly даст 110017).
+    expect(calls).toHaveLength(3);
+    expect(res.qty).toBe(100);
+    expect(res.tpOrders).toHaveLength(0);
+    expect(res.margin).toBe(2000);
+  });
+
+  it('placeLadder: reduce-only PostOnly TP1/TP2/TP3 на открытую позицию', async () => {
+    const calls: { path: string; body: string }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      const u = new URL(String(url));
+      calls.push({ path: u.pathname, body: String(init.body ?? '') });
+      if (u.pathname === '/v5/market/instruments-info') {
+        return okResult({ list: [{ priceFilter: { tickSize: '0.0001' }, lotSizeFilter: { qtyStep: '0.01', minOrderQty: '0.01' } }] });
+      }
+      if (u.pathname === '/v5/order/create') return okResult({ orderId: `oid-${calls.length}` });
+      return okResult({});
+    }));
+
+    const cred = { key: 'K', secret: 'S', testnet: true };
+    const tps = await placeLadder(cred, {
+      category: 'linear', symbol: 'BTCUSDT', qty: 100,
+      tps: [110, 120, 130], direction: 'long',
+    });
+
+    const creates = calls.filter((c) => c.path === '/v5/order/create');
+    expect(creates).toHaveLength(3);
+    expect(creates[0].body).toContain('"qty":"70"');
+    expect(creates[0].body).toContain('"price":"110.00000000"');
+    expect(creates[1].body).toContain('"qty":"20"');
+    expect(creates[1].body).toContain('"price":"120.00000000"');
+    expect(creates[2].body).toContain('"qty":"10"');
+    expect(creates[2].body).toContain('"price":"130.00000000"');
+    for (const tp of creates) {
+      expect(tp.body).toContain('"side":"Sell"');
       expect(tp.body).toContain('"reduceOnly":true');
       expect(tp.body).toContain('"timeInForce":"PostOnly"');
-      expect(tp.body).toContain('"side":"Sell"');
     }
-
-    expect(res.qty).toBe(100);
-    expect(res.tpOrders).toHaveLength(3);
-    expect(res.margin).toBe(2000);
+    expect(tps).toHaveLength(3);
   });
 
   it('wait-план → ошибка без ордеров', async () => {
@@ -111,6 +133,37 @@ describe('openReal', () => {
     const cred = { key: 'K', secret: 'S', testnet: false };
     await expect(openReal(cred, { category: 'linear', symbol: 'BTCUSDT', plan: plan({ direction: 'wait' }), riskMoney: 1000, leverage: 5 }))
       .rejects.toThrow(/направления/);
+  });
+
+  it('openRealMarket: рыночный вход по текущей цене, размер от фактической дистанции до стопа', async () => {
+    const calls: { path: string; body: string }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      const u = new URL(String(url));
+      calls.push({ path: u.pathname, body: String(init.body ?? '') });
+      if (u.pathname === '/v5/market/instruments-info') {
+        return okResult({ list: [{ priceFilter: { tickSize: '0.0001' }, lotSizeFilter: { qtyStep: '0.01', minOrderQty: '0.01' } }] });
+      }
+      if (u.pathname === '/v5/market/tickers') {
+        return okResult({ list: [{ symbol: 'BTCUSDT', lastPrice: '105' }] });
+      }
+      if (u.pathname === '/v5/position/set-leverage') return okResult({ buyLeverage: '5', sellLeverage: '5' });
+      if (u.pathname === '/v5/order/create') return okResult({ orderId: 'mk-1' });
+      return okResult({});
+    }));
+
+    const cred = { key: 'K', secret: 'S', testnet: true };
+    // план: entryMid 100, stop 90 → дистанция от котировки 105 до стопа 90 = 15.
+    // риск 300 $ → qty = 300 / 15 = 20.
+    const res = await openRealMarket(cred, { category: 'linear', symbol: 'BTCUSDT', plan: plan(), riskMoney: 300, leverage: 5 });
+
+    const entry = calls.find((c) => c.path === '/v5/order/create');
+    expect(entry!.body).toContain('"orderType":"Market"');
+    expect(entry!.body).toContain('"qty":"20"');
+    expect(entry!.body).toContain('"stopLoss":"90.00000000"');
+    expect(res.qty).toBe(20);
+    expect(res.notional).toBeCloseTo(2100, 6); // 20 × 105
+    expect(res.margin).toBeCloseTo(420, 6); // 2100 / 5
+    expect(res.tpOrders).toHaveLength(0);
   });
 
   it('слишком маленький размер → ошибка до set-leverage и до ордеров', async () => {
@@ -136,7 +189,7 @@ describe('openReal', () => {
     expect(paths).toEqual(['/v5/market/instruments-info']);
   });
 
-  it('отказ одного TP → откат: вход и выставленные TP снимаются', async () => {
+  it('placeLadder: отказ одного TP → откат снимает уже выставленные TP (cancel с symbol)', async () => {
     const calls: { path: string; body: string }[] = [];
     let created = 0;
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
@@ -145,10 +198,9 @@ describe('openReal', () => {
       if (u.pathname === '/v5/market/instruments-info') {
         return okResult({ list: [{ priceFilter: { tickSize: '0.01' }, lotSizeFilter: { qtyStep: '0.01', minOrderQty: '0.01' } }] });
       }
-      if (u.pathname === '/v5/position/set-leverage') return okResult({ buyLeverage: '5', sellLeverage: '5' });
       if (u.pathname === '/v5/order/create') {
         created += 1;
-        // Вход и TP1 проходят, TP2 отклоняется биржей.
+        // TP1 и TP2 проходят, TP3 отклоняется биржей.
         if (created === 3) return { ok: true, text: async () => JSON.stringify({ retCode: 110003, retMsg: 'Order qty is too small', result: {} }) };
         return okResult({ orderId: `oid-${created}` });
       }
@@ -156,14 +208,18 @@ describe('openReal', () => {
     }));
 
     const cred = { key: 'K', secret: 'S', testnet: true };
-    await expect(openReal(cred, { category: 'linear', symbol: 'ETHUSDT', plan: plan(), riskMoney: 1000, leverage: 5 }))
-      .rejects.toThrow(/откат/);
+    await expect(placeLadder(cred, {
+      category: 'linear', symbol: 'ETHUSDT', qty: 100,
+      tps: [110, 120, 130], direction: 'long',
+    })).rejects.toThrow(/откат/);
 
     const cancels = calls.filter((c) => c.path === '/v5/order/cancel');
-    // Снимаем вход (oid-1) и уже выставленный TP1 (oid-2).
+    // Снимаем уже выставленные TP1 (oid-1) и TP2 (oid-2) — с символом.
     expect(cancels).toHaveLength(2);
     expect(cancels[0].body).toContain('oid-1');
+    expect(cancels[0].body).toContain('ETHUSDT');
     expect(cancels[1].body).toContain('oid-2');
+    expect(cancels[1].body).toContain('ETHUSDT');
   });
 });
 

@@ -1,10 +1,12 @@
 import { Link, useLocation } from 'react-router-dom';
 import { usePaperPositions } from '../hooks/usePaper';
+import { useRealHistory } from '../hooks/useRealHistory';
 import { useApiAccount } from '../hooks/useApiAccount';
 import { groupByCategory, useLivePrices } from '../hooks/useLivePrices';
 import { usePublicWsLive } from '../lib/tickerStore';
 import { useTradingMode } from '../hooks/useTradingMode';
 import { totalPnlOf } from '../lib/paper';
+import { todayRealPnl, startOfToday } from '../lib/realHistory';
 import { effectiveMode } from '../lib/tradeMode';
 import { fmt, fmtCompact } from '../lib/format';
 import Term from './Term';
@@ -26,6 +28,7 @@ export default function PaperHeader() {
   const [mode] = useTradingMode();
   const shown = effectiveMode(mode, pathname);
   const { positions } = usePaperPositions();
+  const { trades: realTrades } = useRealHistory();
   const open = positions.filter((p) => p.status === 'open');
   // Заявки в рынке — не позиции: у них нет P&L, но они видны пользователю.
   const pending = positions.filter((p) => p.status === 'pending');
@@ -44,6 +47,12 @@ export default function PaperHeader() {
   for (const p of positions) {
     if (p.status === 'closed') realized += totalPnlOf(p, p.closePrice ?? p.entryPrice).net;
   }
+  // P&L за сегодня: закрытые бумажные позиции с closedAt сегодня + реальные циклы, закрытые сегодня.
+  const dayStart = startOfToday();
+  const paperToday = positions
+    .filter((p) => p.status === 'closed' && (p.closedAt ?? 0) >= dayStart)
+    .reduce((a, p) => a + totalPnlOf(p, p.closePrice ?? p.entryPrice).net, 0);
+  const realToday = todayRealPnl(realTrades);
   const total = unreal + realized;
   const cls = total > 0 ? 'pos' : total < 0 ? 'neg' : '';
 
@@ -76,9 +85,11 @@ export default function PaperHeader() {
             >
               <Term t="realTrading" label="Реальный счёт" />{' '}
               <b>{fmtCompact(acc.wallet.totalEquity)} $</b>
+              <span className="muted"> · <Term t="pnl" label="P&L" /> сегодня {realToday >= 0 ? '+' : ''}{fmt(realToday, 0)} $</span>
               <span className="muted"> · uP&L {acc.wallet.totalPerpUPL >= 0 ? '+' : ''}{fmt(acc.wallet.totalPerpUPL, 0)} $</span>
               <span className="muted"> · {acc.positions.length} поз.</span>
               <span className="muted"> · <Term t="margin" label="Занято" /> {fmtInt(used)} $</span>
+              <WsBadge state={api.ws} testnet={api.testnet} />
             </Link>
           ) : (
             <Link to="/api" className="pf-chip real" title="Реальные ордера требуют ключ Bybit — подключить на странице /api">
@@ -89,12 +100,13 @@ export default function PaperHeader() {
           <Link to="/paper" className="pf-chip paper" title="Бумажный портфель: P&L, открытые сделки и задействованный капитал">
             <Term t="paperTrading" label="Бумажный портфель" />{' '}
             <b className={cls}>{total >= 0 ? '+' : ''}{fmt(total)} $</b>
+            <span className="muted"> · <Term t="pnl" label="P&L" /> сегодня {paperToday >= 0 ? '+' : ''}{fmt(paperToday, 0)} $</span>
             <span className="muted"> · {open.length} откр.</span>
             {pending.length > 0 && <span className="muted"> · {pending.length} лим.</span>}
             <span className="muted"> · <Term t="margin" label="Задействовано" /> {fmtInt(engaged)} $</span>
+            <WsBadge state={paperWs} />
           </Link>
         )}
-        {shown === 'real' ? <WsBadge state={api.ws} testnet={api.testnet} /> : <WsBadge state={paperWs} />}
       </div>
     </div>
   );

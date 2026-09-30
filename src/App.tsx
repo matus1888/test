@@ -29,8 +29,10 @@ export default function App() {
 
   return (
     <HashRouter>
-      <PaperHeader />
-      <TradeModeBar />
+      <header className="app-head">
+        <PaperHeader />
+        <TradeModeBar />
+      </header>
       <Routes>
         <Route path="/" element={<ScreenerPage />} />
         <Route path="/s/:category/:symbol" element={<SymbolPage />} />

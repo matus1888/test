@@ -84,7 +84,7 @@ src/
                           #   позиционный TP/SL, scopeParams (symbol | settleCoin | baseCoin), CREDENTIALS_EVENT
   api/live.ts             # реальный движок: getInstrument (tick/qtyStep/minOrderQty/minNotional), округление,
                           #   planLadder (пред-полётная проверка размера и срезов лесенки),
-                          #   openReal (плечо→вход+SL→лесенка TP1/TP2/TP3, откат при отказе TP),
+                          #   openReal (плечо→вход+SL), placeLadder (TP1/2/3 после исполнения входа),
                           #   closeReal, moveStopToBreakeven
   api/ws.ts               # WebSocket Bybit V5: WsConnection (подписки по refcount, auth приватного канала,
                           #   ping 20 с, бэк-офф реконнекта, рамки budgets), singletons publicWs/privateWs,
@@ -199,7 +199,7 @@ tests/
   bybit.test.ts           # fetchKlines/fetchTickers (mock fetch), bybitTradeUrl, валидаторы
   privateApi.test.ts      # HMAC-подпись (сверка с node:crypto), buildQuery, ошибки API, wallet parsing,
                           #   parseDevCredentials, scopeParams (order/realtime и cancel-all без symbol)
-  live.test.ts            # округление qty/tick, openReal (плечо→вход+SL→лесенка TP, откат),
+  live.test.ts            # округление qty/tick, openReal (вход+SL), placeLadder (TP, откат),
                           #   planLadder (минимум позиции/риска под биржевые ограничения)
   tradeMode.test.ts       # режим торговли: дефолт paper, parseMode, isRealContext/effectiveMode, liveHref
   walkthrough.test.ts     # шаги обзора: уникальные заголовки, маршруты страниц
@@ -359,16 +359,22 @@ SESSION-MAINNET.md        # локальный файл (в .gitignore): сце�
   (шаг 0.001 = 85 $) лесенка требует позиции ≥ 0.01 BTC ≈ 850 $.
 - Перед отправкой ордеров `openReal` зовёт `planLadder`: если вход или любой срез не проходят
   `minOrderQty`/`minNotional`, бросаем русскую ошибку с требуемым риском и **не** меняем плечо.
-  Если TP не выставился после входа — откат: `cancelOrder` по id входа и уже поставленных TP,
-  в сообщении предупреждение, если что-то снять не удалось. На `/live` минимум виден до нажатия
-  («Минимум для лесенки»), а кнопка открытия блокируется.
+  На `/live` минимум виден до нажатия («Минимум для лесенки»), а кнопка открытия блокируется.
+  Лесенка выставляется после исполнения входа: если `placeLadder` упал (сбой биржи) — откат снимает
+  уже поставленные TP (`cancelOrder` с `symbol`), в сообщении предупреждение, если снять не удалось.
 - Бумажный движок биржевые минимумы **не** проверяет — это симулятор, R-логика лесенки там не трогается.
   Пред-полётная проверка `planLadder` относится только к реальным ордерам.
-- Реальный путь не менялся и всегда был честным: `openReal` = плечо → GTC-лимит по `entryMid` со
-  стопом → reduce-only TP1/TP2/TP3; позиции нет, пока лимит не задет, и `/live` показывает висящие
-  ордера. Бумажный портфель теперь повторяет именно эту механику — общих мест у них нет, паритет
-  только в правилах. Проверять реальный депозит после правки не нужно: код `/live`, `/real`,
-  `privateApi` и `live.ts` не тронуты (в `git diff` их нет).
+- Реальный путь честный и проверен живым тестом (30.09.2026): `openReal` = плечо → GTC-лимит по
+  `entryMid` со стопом, позиции нет, пока лимит не задет, и `/live` показывает висящие ордера.
+  **Лесенка TP1/TP2/TP3 ставится ОТДЕЛЬНО — `placeLadder` — и только ПОСЛЕ исполнения входа**
+  (позиция открылась). Причина: reduce-only заявки Bybit отклоняет, пока позиции нет — живой ответ
+  `110017 current position is zero, cannot fix reduce-only order qty` на TP1 (766 шт), когда он
+  выставлялся вместе с входом. Поэтому до заливки входа на бирже висит только вход (со стопом из
+  заявки), а `/live` ждёт позицию по сокету и выставляет TP автоматически (+ ручная кнопка
+  «Выставить TP» на позиции). `cancelOrder` обязателен с `symbol` — без него биржа отвечает
+  `10001 params error: symbol invalid` (живой ответ), и кнопка «Отменить»/откат не снимают ордера.
+  Бумажный портфель повторяет эту механику по правилам — общих мест у них нет, паритет только в
+  правилах.
 - ✅ Блокировка `/api` и `/live` снята по решению владельца (региональные заглушки `BlockedFeature.tsx`
   удалены, в `STEPS` 8 шагов, в шапке и кабинете есть ссылки). Побочный эффект: на опубликованном
   GitHub Pages форма ключей и кнопки реальной торговли видны всем; ключи остаются в localStorage
@@ -378,9 +384,9 @@ SESSION-MAINNET.md        # локальный файл (в .gitignore): сце�
   Галочка «Не сохранять ключ» на /api (sessionStorage `api:sessionKeys`) — креды только в памяти вкладки
   (`saveCredentials(c, persist=false)`), в localStorage ничего не пишется; `loadCredentials` смотрит
   сессию → localStorage → `.env`.
-  `openReal` = установка плеча → лимитный вход со столом (SL, trigger MarkPrice) → reduce-only лимитки
-  TP1/TP2/TP3 (PostOnly). Закрытие — отмена ордеров + маркет reduceOnly (`qty: 0` + `closeOnTrigger`).
-  Стоп в безубыток — `/v5/position/trading-stop`.
+  `openReal` = установка плеча → лимитный вход со столом (SL, trigger MarkPrice); `placeLadder` после
+  исполнения входа ставит reduce-only лимитки TP1/TP2/TP3 (PostOnly). Закрытие — отмена ордеров +
+  маркет reduceOnly (`qty: 0` + `closeOnTrigger`). Стоп в безубыток — `/v5/position/trading-stop`.
 - Ключи из `.env` подхватывает **только dev-сервер** (плагин `devBybitKeys` в `vite.config.ts` отдаёт
   виртуальный модуль `virtual:bybit-dev-keys`; тип — в `src/env.d.ts`, заглушка для vitest — в
   `tests/helpers/devKeys.ts`). В `bun run build` значения пустые, секреты в `dist/` не попадают.

@@ -175,6 +175,11 @@ export interface OpenRealResult {
   notional: number;
   margin: number;
   entryOrder: OrderResult;
+  /**
+   * TP-ордера. Пусто сразу после `openReal`: reduce-only заявки Bybit отклоняет,
+   * пока позиции нет (110017 «current position is zero»), поэтому лесенка TP1/TP2/TP3
+   * ставится отдельно — `placeLadder`, ПОСЛЕ исполнения входа и открытия позиции.
+   */
   tpOrders: OrderResult[];
 }
 
@@ -182,13 +187,13 @@ function linkId(tag: string): string {
   return `${tag}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`.slice(0, 36);
 }
 
-/** Снять выставленные ордера по id; возвращает количество тех, что снять не удалось. */
-async function cancelPlaced(cred: ApiCredentials, category: Category, orders: OrderResult[]): Promise<number> {
+/** Отменить один ордер по id (Bybit требует symbol — кнопка «Отменить» на /live). */
+async function cancelPlaced(cred: ApiCredentials, category: Category, symbol: string, orders: OrderResult[]): Promise<number> {
   let failed = 0;
   for (const o of orders) {
     if (!o.orderId) continue;
     try {
-      await cancelOrder(cred, category, o.orderId);
+      await cancelOrder(cred, category, o.orderId, symbol);
     } catch {
       failed += 1;
     }
@@ -196,7 +201,12 @@ async function cancelPlaced(cred: ApiCredentials, category: Category, orders: Or
   return failed;
 }
 
-/** Открыть реальную позицию по плану: плечо → лимитный вход со стопом → reduce-only TP1/TP2/TP3. */
+/**
+ * Открыть реальную позицию по плану: плечо → лимитный вход со стопом.
+ * TP1/TP2/TP3 здесь НЕ ставятся: reduce-only заявки биржа отклоняет, пока позиции
+ * нет (живая проверка 30.09.2026: TP1 766 шт → 110017 «current position is zero»).
+ * Лесенку выставляет `placeLadder` после исполнения входа.
+ */
 export async function openReal(cred: ApiCredentials, args: OpenRealArgs): Promise<OpenRealResult> {
   const { category, symbol, plan, riskMoney, leverage } = args;
   const positionIdx = args.positionIdx ?? 0;
@@ -229,21 +239,95 @@ export async function openReal(cred: ApiCredentials, args: OpenRealArgs): Promis
     orderLinkId: linkId('ent'),
   });
 
-  // Лесенка: reduce-only лимитки на доли позиции (могут стоять до наполнения входа).
+  return {
+    qty,
+    notional: qty * plan.entryMid,
+    margin: (qty * plan.entryMid) / leverage,
+    entryOrder,
+    tpOrders: [],
+  };
+}
+
+export interface PlaceLadderArgs {
+  category: Category;
+  symbol: string;
+  /** Полный размер позиции (после исполнения входа). */
+  qty: number;
+  /** Цены TP1/TP2/TP3 из плана. */
+  tps: [number, number, number];
+  direction: 'long' | 'short';
+  positionIdx?: number;
+}
+
+/**
+ * Рыночный вход на открытую позицию (вид входа «по рынку» на /live).
+ * От лимитного отличается исполнением сразу по текущей цене: qty = риск /
+ * фактическое расстояние до стопа (не entryMid — иначе размер не отражал бы
+ * реальную дистанцию). Стоп ставится в заявке (MarkPrice), лесенка TP — после
+ * исполнения, как и у лимитного входа.
+ */
+export async function openRealMarket(
+  cred: ApiCredentials,
+  args: { category: Category; symbol: string; plan: TradePlan; riskMoney: number; leverage: number; positionIdx?: number },
+): Promise<OpenRealResult> {
+  const { category, symbol, plan, riskMoney, leverage } = args;
+  const positionIdx = args.positionIdx ?? 0;
+  if (plan.direction !== 'long' && plan.direction !== 'short') throw new Error('План без направления');
+  const info = await getInstrument(cred, category, symbol);
+  const tk = await requestPrivate<{ list?: { symbol: string; lastPrice: string }[] }>(
+    'GET', '/v5/market/tickers', { category, symbol }, cred,
+  );
+  const lastPrice = Number(tk.list?.[0]?.lastPrice ?? 0);
+  if (!(lastPrice > 0)) throw new Error('Нет котировки для рыночного входа — повтори попытку');
+
+  // Размер от фактической дистанции до стопа: риск $ / (|last − stop|).
+  const riskDist = Math.abs(lastPrice - plan.stop);
+  if (!(riskDist > 0)) throw new Error('Стоп на цене входа — нечего рисковать');
+  const qty = roundDownToStep(riskMoney / riskDist, info.qtyStep);
+  if (!orderAllowed(qty, lastPrice, info)) {
+    throw new Error(
+      `Рыночный размер не проходит ограничения биржи: позиция ${usd(qty * lastPrice)} $ `
+      + `(риск ${usd(riskMoney)} $). Уменьши риск или возьми символ с мелким шагом количества.`,
+    );
+  }
+
+  await setLeverage(cred, { category, symbol, leverage, positionIdx });
+  const entryOrder = await placeOrder(cred, {
+    category, symbol, side: plan.direction === 'long' ? 'Buy' : 'Sell', orderType: 'Market',
+    qty: String(qty), timeInForce: 'IOC', positionIdx,
+    stopLoss: roundToTick(plan.stop, info.tickSize).toFixed(8), slTriggerBy: 'MarkPrice',
+    orderLinkId: linkId('ent'),
+  });
+
+  return {
+    qty,
+    notional: qty * lastPrice,
+    margin: (qty * lastPrice) / leverage,
+    entryOrder,
+    tpOrders: [],
+  };
+}
+
+/**
+ * Выставить reduce-only лимитки TP1 70 % / TP2 20 % / TP3 10 % на открытую позицию.
+ * Вызывается ПОСЛЕ исполнения входа (позиция уже есть): до этого биржа отклоняет
+ * reduce-only заявки (110017). PostOnly — не «съедает» входимый маркет-ордер.
+ * При отказе одного TP — откат: снимаем уже выставленные; что снять не удалось —
+ * остаётся на бирже (сообщение предупреждает).
+ */
+export async function placeLadder(cred: ApiCredentials, args: PlaceLadderArgs): Promise<OrderResult[]> {
+  const { category, symbol, qty, tps, direction, positionIdx = 0 } = args;
+  const side: 'Buy' | 'Sell' = direction === 'short' ? 'Buy' : 'Sell';
+  const info = await getInstrument(cred, category, symbol);
   const tpOrders: OrderResult[] = [];
-  const placed: OrderResult[] = [entryOrder];
-  const tps: Array<[number, number]> = [
-    [plan.tp1, LADDER_SHARES[0]],
-    [plan.tp2, LADDER_SHARES[1]],
-    [plan.tp3, LADDER_SHARES[2]],
-  ];
+  const placed: OrderResult[] = [];
   try {
-    for (const [tp, frac] of tps) {
-      const tpQty = roundDownToStep(qty * frac, info.qtyStep);
+    for (let i = 0; i < LADDER_SHARES.length; i += 1) {
+      const tpQty = roundDownToStep(qty * LADDER_SHARES[i], info.qtyStep);
       if (!(tpQty > 0)) continue;
       const tpOrder = await placeOrder(cred, {
-        category, symbol, side: plan.direction === 'long' ? 'Sell' : 'Buy', orderType: 'Limit',
-        qty: String(tpQty), price: roundToTick(tp, info.tickSize).toFixed(8),
+        category, symbol, side, orderType: 'Limit',
+        qty: String(tpQty), price: roundToTick(tps[i], info.tickSize).toFixed(8),
         timeInForce: 'PostOnly', positionIdx, reduceOnly: true,
         orderLinkId: linkId('tp'),
       });
@@ -251,24 +335,17 @@ export async function openReal(cred: ApiCredentials, args: OpenRealArgs): Promis
       placed.push(tpOrder);
     }
   } catch (e) {
-    // Откат: снимаем вход и уже выставленные TP, чтобы не остаться с позицией без выходов.
-    // Если вход уже наполнился, его стоп (stopLoss в заявке на вход) продолжает работать.
-    const failed = await cancelPlaced(cred, category, placed);
+    // Откат: снимаем уже выставленные TP. Вход уже открыт — его стоп (stopLoss
+    // в заявке на вход) продолжает работать.
+    const failed = await cancelPlaced(cred, category, symbol, placed);
     throw new Error(
-      `Лесенка не выставилась: ${e instanceof Error ? e.message : String(e)}. `
+      `Лесенка TP не выставилась: ${e instanceof Error ? e.message : String(e)}. `
       + (failed === 0
-        ? 'Вход и уже выставленные TP сняты (откат), позиции нет.'
-        : `⚠️ Часть ордеров снять не удалось (${failed} шт) — проверь активные ордера на бирже.`),
+        ? 'Уже выставленные TP сняты (откат).'
+        : `⚠️ Часть TP снять не удалось (${failed} шт) — проверь активные ордера на бирже.`),
     );
   }
-
-  return {
-    qty,
-    notional: qty * plan.entryMid,
-    margin: (qty * plan.entryMid) / leverage,
-    entryOrder,
-    tpOrders,
-  };
+  return tpOrders;
 }
 
 /** Закрыть позицию и убрать её ордера: рыночный reduceOnly-закрытие (qty=0+closeOnTrigger). */

@@ -175,6 +175,8 @@ export function mergeWallet(prev: WalletBalance, data: unknown): WalletBalance {
       equity: num(c.equity),
       availableToWithdraw: num(c.availableToWithdraw),
       usdValue: num(c.usdValue),
+      positionIM: num(c.totalPositionIM),
+      orderIM: num(c.totalOrderIM),
     }));
   }
   return next;
